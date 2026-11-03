@@ -39,6 +39,7 @@ Every finding below was reproduced or verified by running code, unless marked ot
 | L7 | Low | No `Retry-After`, unbounded response size, URL userinfo / stray `?` allowed | Retry-After (capped 30 s), streaming 16 MB cap, rejected | `test_info_client_*` |
 | C1 | Low | CI: Node 20 deprecation; Postgres healthcheck queried a non-existent DB; push+PR double runs | checkout v6, setup-node v6, setup-uv v7 (all node24, verified from `action.yml`); `-d autotrader_test`; push only on `main` + concurrency | CI run on this PR |
 | D1 | Low | Docker: uv 0.8.22 vs lockfile from uv 0.11.32; web image shipped devDependencies and was root-owned; no API healthcheck | uv 0.11.32; Next `standalone` output, `--chown=node`; healthchecks; new CI `docker` job builds both images | CI `docker` job |
+| D2 | Medium | Found by the new CI `docker` job: the M3 value check rejected `PYTHON_SHA256` (a 64-hex checksum set by the official python image), so the backend container refused to start | A bare 64-hex value is allowed only under a checksum-like name (SHA/SHA256/HASH/CHECKSUM/DIGEST); `0x`+64-hex is always rejected | `test_ordinary_env_is_accepted[PYTHON_SHA256…]`, `test_0x_key_rejected_even_under_checksum_name` |
 | X1 | Low | 0002 backfill left `subject` empty for 0001-era success events | Backfill from message prefix | Verified on a DB with real 0001 data |
 | X2 | Low | My own interim commit `266e49b` contained a ruff error (the exit code was hidden by a pipe) | Fixed in `3fe15ff`; checks now run with `pipefail` | CI |
 

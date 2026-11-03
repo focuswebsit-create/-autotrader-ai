@@ -75,6 +75,12 @@ CREDENTIAL_ENV_TOKENS: Final[frozenset[str]] = frozenset(
 )
 #: Values that look like an Ethereum private key or a BIP-39 mnemonic.
 _HEX_KEY_RE: Final = re.compile(r"(0x)?[0-9a-fA-F]{64}")
+#: A bare 64-hex value is also what SHA-256 checksums look like (e.g. PYTHON_SHA256
+#: in the official python image). It is tolerated only under a checksum-like name;
+#: a 0x-prefixed value is rejected regardless of the name.
+CHECKSUM_ENV_TOKENS: Final[frozenset[str]] = frozenset(
+    {"SHA", "SHA256", "SHA512", "HASH", "CHECKSUM", "DIGEST"}
+)
 _MNEMONIC_RE: Final = re.compile(r"[a-z]+(\s+[a-z]+){11,23}")
 
 #: Mode-like env vars: if set, they must equal ``PAPER``.
@@ -135,9 +141,16 @@ def _forbidden_env_name(name: str) -> bool:
     return bool(tokens & EXCHANGE_ENV_TOKENS and tokens & CREDENTIAL_ENV_TOKENS)
 
 
-def _forbidden_env_value(value: str) -> bool:
+def _forbidden_env_value(name: str, value: str) -> bool:
     stripped = value.strip()
-    return bool(_HEX_KEY_RE.fullmatch(stripped) or _MNEMONIC_RE.fullmatch(stripped))
+    if _MNEMONIC_RE.fullmatch(stripped):
+        return True
+    if not _HEX_KEY_RE.fullmatch(stripped):
+        return False
+    if stripped.lower().startswith("0x"):
+        return True
+    tokens = {t for t in re.split(r"[^A-Z0-9]+", name.upper()) if t}
+    return not tokens & CHECKSUM_ENV_TOKENS
 
 
 def check_environment(env: Mapping[str, str] | None = None) -> None:
@@ -148,7 +161,7 @@ def check_environment(env: Mapping[str, str] | None = None) -> None:
     """
     environ = os.environ if env is None else env
     for name, value in environ.items():
-        if _forbidden_env_name(name) or _forbidden_env_value(value):
+        if _forbidden_env_name(name) or _forbidden_env_value(name, value):
             raise SafetyViolationError(
                 f"Environment variable '{name}' looks like wallet/signing material. "
                 "AutoTrader AI is PAPER-ONLY and must never receive keys."

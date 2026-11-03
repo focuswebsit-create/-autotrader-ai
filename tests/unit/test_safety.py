@@ -293,9 +293,15 @@ def test_signing_material_in_env_refuses_startup(name: str) -> None:
     ],
 )
 def test_key_like_values_refuse_startup(value: str) -> None:
+    # Under a neutral name every key-like form is rejected.
     with pytest.raises(SafetyViolationError) as e:
         check_environment({"INNOCENT_NAME": value})
     assert value.strip() not in str(e.value), "secret value must never be echoed"
+
+
+def test_0x_key_rejected_even_under_checksum_name() -> None:
+    with pytest.raises(SafetyViolationError):
+        check_environment({"PYTHON_SHA256": "0x" + "ab" * 32})
 
 
 @pytest.mark.parametrize(
@@ -307,6 +313,9 @@ def test_key_like_values_refuse_startup(value: str) -> None:
         ("PRIVILEGE_NOTE", "x"),
         ("DESCRIPTION", "the quick brown fox"),
         ("AWS_SECRET_ACCESS_KEY", "notifications-only"),
+        # Regression (CI docker job): set by the official python:3.12-slim image.
+        ("PYTHON_SHA256", "c30bb24a7a6a2f7b5e8d1a4f3e2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b"),
+        ("ARTIFACT_CHECKSUM", "ab" * 32),
     ],
 )
 def test_ordinary_env_is_accepted(name: str, value: str) -> None:
