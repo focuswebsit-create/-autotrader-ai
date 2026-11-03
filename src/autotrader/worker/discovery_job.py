@@ -59,23 +59,20 @@ def run_discovery_once(
             max_divergence_bps=settings.max_oracle_mark_divergence_bps,
         )
     except DiscoveryError as exc:
+        code, message = str(exc.code), exc.message
         log.error(
             "market discovery failed - entries blocked (fail-closed)",
-            extra={"code": str(exc.code), "detail": exc.message},
+            extra={"code": code, "detail": message},
         )
         persisted = True
         if sessions is not None:
-            persisted = _persist(
-                sessions,
-                lambda s: record_event(
-                    s,
-                    "MARKET_DISCOVERY_FAILED",
-                    "ERROR",
-                    exc.message,
-                    {"code": str(exc.code), "coin": settings.market_coin},
-                ),
-            )
-        return DiscoveryOutcome(False, None, str(exc.code), exc.message, persisted)
+            details = {"code": code, "coin": settings.market_coin}
+
+            def write_failure(s: Session) -> None:
+                record_event(s, "MARKET_DISCOVERY_FAILED", "ERROR", message, details)
+
+            persisted = _persist(sessions, write_failure)
+        return DiscoveryOutcome(False, None, code, message, persisted)
 
     log.info(
         "market discovered",
