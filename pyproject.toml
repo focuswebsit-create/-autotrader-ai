@@ -1,0 +1,69 @@
+[project]
+name = "autotrader-ai"
+version = "0.1.0"
+description = "AutoTrader AI - PAPER-ONLY research and paper-trading system for Hyperliquid xyz:CL (read-only public data)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+# NOTE: No signing / wallet libraries (eth-account, web3, hyperliquid-python-sdk)
+# are allowed here. tests/unit/test_safety_static.py enforces this.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+autotrader = "autotrader.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autotrader"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "N", "SIM", "RUF"]
+ignore = ["S101"]  # assert is fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "N802"]
+"src/autotrader/db/migrations/**" = ["N", "E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+packages = ["autotrader"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["autotrader.db.migrations.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "live: performs real read-only HTTP calls to the Hyperliquid public Info API (opt-in: RUN_LIVE_TESTS=1)",
+    "db: requires a PostgreSQL database (DATABASE_URL)",
+]
