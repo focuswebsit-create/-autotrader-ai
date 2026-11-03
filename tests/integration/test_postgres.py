@@ -157,3 +157,172 @@ def test_extreme_values_never_reach_the_database(
     assert outcome.persisted is True
     with sessions() as s:
         assert latest_discovery(s, "xyz:CL") is None
+
+
+# --------------------------------------------------------------------------- Phase 1
+
+ROLE_PW = "test-only-pw"
+
+
+def _role_url(role: str) -> str:
+    url = make_url(DB_URL)
+    return url.set(username=role, password=ROLE_PW).render_as_string(hide_password=False)
+
+
+@pytest.fixture
+def roles(migrated: str) -> dict[str, Any]:
+    """Login users exactly as infra/db/roles.sql defines them (group-role membership)."""
+    engine = create_engine(migrated)
+    with engine.begin() as c:
+        for login, group in (
+            ("autotrader_api", "autotrader_reader"),
+            ("autotrader_worker", "autotrader_writer"),
+        ):
+            exists = c.execute(
+                text("SELECT 1 FROM pg_roles WHERE rolname=:r"), {"r": login}
+            ).first()
+            if not exists:
+                c.execute(text(f"CREATE ROLE {login} LOGIN"))
+            c.execute(
+                text(f"ALTER ROLE {login} WITH LOGIN NOSUPERUSER INHERIT PASSWORD '{ROLE_PW}'")
+            )
+            c.execute(text(f"GRANT {group} TO {login}"))
+    return {
+        "api": create_engine(_role_url("autotrader_api")),
+        "worker": create_engine(_role_url("autotrader_worker")),
+    }
+
+
+DENIED = ("permission denied", "must be owner", "insufficientprivilege")
+
+
+def _denied(engine: Any, sql: str) -> bool:
+    try:
+        with engine.begin() as c:
+            c.execute(text(sql))
+    except DBAPIError as exc:
+        return any(d in str(exc).lower().replace(" ", "") or d in str(exc).lower() for d in DENIED)
+    return False
+
+
+CANDLE_SQL = (
+    "INSERT INTO candles (coin, interval, open_time, close_time, open, high, low, close, volume, "
+    "is_closed, source, first_seen_at, updated_at) VALUES ('xyz:CL','30m', "
+    "'2026-01-01T00:00:00Z','2026-01-01T00:30:00Z', {o},{h},{l},{c},1, true,'rest', now(), now())"
+)
+
+
+def test_worker_role_least_privilege(roles: dict[str, Any]) -> None:
+    w = roles["worker"]
+    with w.begin() as c:  # allowed: what the collector actually does
+        c.execute(text(CANDLE_SQL.format(o=90, h=91, l=89, c=90.5)))
+        c.execute(text("UPDATE candles SET volume = 2"))
+        c.execute(
+            text(
+                "INSERT INTO system_events (event_type, severity, message, details) "
+                "VALUES ('X','INFO','m','{}')"
+            )
+        )
+    assert _denied(w, "DELETE FROM candles")
+    assert _denied(w, "TRUNCATE candles")
+    assert _denied(w, "DROP TABLE candles")
+    assert _denied(w, "ALTER TABLE candles DROP CONSTRAINT ck_candles_ohlc")
+    assert _denied(w, "UPDATE system_config SET value='false'::jsonb WHERE key='paper_only'")
+    assert _denied(w, "INSERT INTO audit_log (actor, action, entity) VALUES ('w','x','y')")
+    assert _denied(w, "DELETE FROM system_events")
+    assert _denied(w, "CREATE TABLE evil (id int)")
+
+
+def test_api_role_is_read_only(roles: dict[str, Any]) -> None:
+    a = roles["api"]
+    with a.connect() as c:
+        c.execute(text("SELECT count(*) FROM candles")).scalar_one()
+        c.execute(text("SELECT count(*) FROM service_heartbeats")).scalar_one()
+    assert _denied(a, CANDLE_SQL.format(o=90, h=91, l=89, c=90.5))
+    assert _denied(a, "UPDATE candles SET volume = 3")
+    assert _denied(
+        a,
+        "INSERT INTO service_heartbeats (service, state, ws_state, started_at, "
+        "last_heartbeat_at) VALUES ('x','RUNNING','CONNECTED',now(),now())",
+    )
+    assert _denied(a, "DELETE FROM data_quality_issues")
+
+
+def test_every_table_is_granted_to_roles(migrated: str) -> None:
+    """New tables in future migrations must not be forgotten in the grants."""
+    engine = create_engine(migrated)
+    with engine.connect() as c:
+        tables = (
+            c.execute(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname='public' AND tablename <> 'alembic_version'"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for t in tables:
+            for role in ("autotrader_reader", "autotrader_writer"):
+                ok = c.execute(
+                    text("SELECT has_table_privilege(:r, :t, 'SELECT')"), {"r": role, "t": t}
+                ).scalar()
+                assert ok, f"{role} lacks SELECT on {t}"
+
+
+@pytest.mark.parametrize(
+    "vals",
+    [dict(o=0, h=1, l=0, c=1), dict(o=90, h=89, l=88, c=90), dict(o=90, h=91, l=90.5, c=90)],
+)
+def test_candle_check_constraints(migrated: str, vals: dict[str, float]) -> None:
+    engine = create_engine(migrated)
+    with pytest.raises(DBAPIError), engine.begin() as c:
+        c.execute(text(CANDLE_SQL.format(**vals)))
+
+
+def test_unique_bar_constraint(migrated: str) -> None:
+    engine = create_engine(migrated)
+    with engine.begin() as c:
+        c.execute(text(CANDLE_SQL.format(o=90, h=91, l=89, c=90.5)))
+    with pytest.raises(DBAPIError), engine.begin() as c:
+        c.execute(text(CANDLE_SQL.format(o=90, h=91, l=89, c=90.5)))
+
+
+def test_postgres_backfill_idempotent_and_exact(migrated: str, snapshot_30m: Any) -> None:
+    from decimal import Decimal
+
+    from autotrader.db.market_data import closed_candles
+    from autotrader.ingest.rest import backfill
+    from autotrader.market.candles import Interval
+    from tests.conftest import RECORDED_AT, Clock
+
+    class Info:
+        def info(self, payload: dict[str, Any]) -> Any:
+            return snapshot_30m
+
+    sessions = sessionmaker(bind=create_engine(migrated), expire_on_commit=False)
+    first = backfill(sessions, Info(), coin="xyz:CL", interval=Interval.M30, clock=Clock())
+    again = backfill(sessions, Info(), coin="xyz:CL", interval=Interval.M30, clock=Clock())
+    assert first.inserted == 201 and again.inserted == 0 and again.updated == 0
+    with sessions() as s:
+        rows = closed_candles(s, "xyz:CL", Interval.M30, as_of=RECORDED_AT)
+        assert len(rows) == 200
+        assert rows[0].close == Decimal(snapshot_30m[0]["c"])  # exact NUMERIC round-trip
+
+
+def test_single_collector_lock(migrated: str) -> None:
+    from autotrader.db.market_data import try_collector_lock
+
+    sessions = sessionmaker(bind=create_engine(migrated))
+    a, b = sessions(), sessions()
+    try:
+        assert try_collector_lock(a) is True
+        assert try_collector_lock(b) is False  # a second collector must refuse to start
+    finally:
+        a.close()
+        b.close()
+    c = sessions()
+    try:
+        assert try_collector_lock(c) is True  # released when the holder disconnects
+    finally:
+        c.close()

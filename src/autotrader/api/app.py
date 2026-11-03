@@ -6,6 +6,7 @@ Every route here is a GET. There is no order / trade / exchange route and
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from autotrader import __version__
+from autotrader.api.market_data import build_router
 from autotrader.common.config import Settings, get_settings
 from autotrader.common.safety import (
     ALLOWED_INFO_TYPES,
@@ -30,7 +32,10 @@ DISCOVERY_STALE_AFTER_S = 15 * 60
 
 
 def create_app(
-    settings: Settings | None = None, sessions: sessionmaker[Session] | None = None
+    settings: Settings | None = None,
+    sessions: sessionmaker[Session] | None = None,
+    *,
+    clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
 ) -> FastAPI:
     check_environment()
     mode = assert_paper_mode()
@@ -49,6 +54,7 @@ def create_app(
         allow_methods=["GET"],
         allow_headers=["*"],
     )
+    app.include_router(build_router(settings, lambda: sessions, clock))
 
     @app.get("/health")
     def health(response: Response) -> dict[str, Any]:

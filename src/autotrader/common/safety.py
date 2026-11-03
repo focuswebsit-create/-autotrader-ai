@@ -32,8 +32,18 @@ INFO_HOST: Final = "api.hyperliquid.xyz"
 INFO_PATH: Final = "/info"
 INFO_URL: Final = f"{INFO_SCHEME}://{INFO_HOST}{INFO_PATH}"
 
-#: Public WebSocket used for market data in later phases (subscriptions only).
+#: Public WebSocket used for market data (subscriptions only).
 WS_URL: Final = "wss://api.hyperliquid.xyz/ws"
+#: Outgoing WS methods. Hyperliquid's WS also supports ``"post"`` (which can carry
+#: signed exchange actions) - it is deliberately NOT allowed.
+ALLOWED_WS_METHODS: Final[frozenset[str]] = frozenset({"subscribe", "unsubscribe", "ping"})
+#: Public market-data subscriptions only (no user/account channels).
+ALLOWED_WS_SUBSCRIPTIONS: Final[frozenset[str]] = frozenset(
+    {"candle", "activeAssetCtx", "l2Book", "trades"}
+)
+_ALLOWED_WS_SUB_KEYS: Final[frozenset[str]] = frozenset(
+    {"type", "coin", "interval", "nSigFigs", "mantissa"}
+)
 
 #: Read-only Info request types this project is allowed to issue.
 ALLOWED_INFO_TYPES: Final[frozenset[str]] = frozenset(
@@ -151,6 +161,39 @@ def _forbidden_env_value(name: str, value: str) -> bool:
         return True
     tokens = {t for t in re.split(r"[^A-Z0-9]+", name.upper()) if t}
     return not tokens & CHECKSUM_ENV_TOKENS
+
+
+def check_ws_url(url: str) -> None:
+    """Only the exact public Hyperliquid WS URL may be opened."""
+    if url != WS_URL:
+        raise SafetyViolationError("WebSocket URL not on allow-list")
+
+
+def check_ws_message(message: str | bytes) -> None:
+    """Validate an OUTGOING WS frame: subscribe/unsubscribe/ping to public data only."""
+    try:
+        payload = json.loads(message)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SafetyViolationError("WS message is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise SafetyViolationError("WS message must be a JSON object")
+    method = payload.get("method")
+    if method not in ALLOWED_WS_METHODS:
+        raise SafetyViolationError(f"WS method not allowed: {method!r}")
+    allowed_top = {"method"} if method == "ping" else {"method", "subscription"}
+    if set(payload) - allowed_top:
+        raise SafetyViolationError(f"WS message has unexpected fields: {sorted(set(payload))}")
+    if method == "ping":
+        return
+    sub = payload.get("subscription")
+    if not isinstance(sub, dict):
+        raise SafetyViolationError("WS subscription must be an object")
+    if sub.get("type") not in ALLOWED_WS_SUBSCRIPTIONS:
+        raise SafetyViolationError(f"WS subscription type not allowed: {sub.get('type')!r}")
+    extra = set(sub) - _ALLOWED_WS_SUB_KEYS
+    if extra:
+        # e.g. "user": account-specific channels are out of scope for a paper system.
+        raise SafetyViolationError(f"WS subscription fields not allowed: {sorted(extra)}")
 
 
 def check_environment(env: Mapping[str, str] | None = None) -> None:

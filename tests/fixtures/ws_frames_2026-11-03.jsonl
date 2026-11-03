@@ -1,0 +1,5 @@
+{"channel": "subscriptionResponse", "data": {"method": "subscribe", "subscription": {"type": "candle", "interval": "30m", "coin": "xyz:CL"}}}
+{"channel": "activeAssetCtx", "data": {"coin": "xyz:CL", "ctx": {"funding": "0.00000625", "openInterest": "2718940.899999999", "prevDayPx": "97.203", "dayNtlVlm": "580172348.2252886295", "premium": "0.0001663375", "oraclePx": "96.19", "markPx": "96.201", "midPx": "96.202", "impactPxs": ["96.201", "96.211"], "dayBaseVlm": "6003497.5590000013"}}}
+{"channel": "pong"}
+{"channel": "candle", "data": {"t": 1793718000000, "T": 1793721599999, "s": "xyz:CL", "i": "1h", "o": "95.877", "c": "96.182", "h": "96.683", "l": "95.661", "v": "146013.543", "n": 3673}}
+{"channel": "candle", "data": {"t": 1793719800000, "T": 1793721599999, "s": "xyz:CL", "i": "30m", "o": "96.37", "c": "96.182", "h": "96.561", "l": "96.118", "v": "3546.51", "n": 303}}
