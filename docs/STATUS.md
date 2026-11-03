@@ -1,6 +1,8 @@
 # Status
 
-**Current phase:** Phase 0 — Discovery & scaffolding · **Mode:** PAPER ONLY · **Updated:** 2026-11-03
+**Current phase:** Phase 1 — Market Data Engine (complete, awaiting merge) · **Mode:** PAPER ONLY · **Updated:** 2026-11-03
+
+Phase 1 details and evidence: `docs/PHASE1_REPORT.md`.
 
 ## Phase 0 gate: "startup performs public, read-only discovery and proves it cannot trade"
 
@@ -23,9 +25,19 @@ Full review and fixes: see `docs/QA_REVIEW_PHASE0.md`. Locally: 178 tests passed
 - `hyperliquid.gitbook.io` is blocked by the environment network policy, so ADR-004 and ADR-005 rest on prior knowledge plus live metadata. To re-verify, add that domain to the allowed list.
 - Docker images cannot be built in the cloud dev container (no daemon); the CI `docker` job builds both images.
 - No authentication yet (read-only API, localhost-bound). Required before any online exposure (Phase 4).
-- The app connects to PostgreSQL as table owner; the DB guards are tripwires. Use a non-owner runtime role before any shared deployment (ADR-010).
-- No WebSocket client yet; Phase 1 must route it through an allow-list equivalent to the HTTP one.
+- (Resolved in Phase 1) Least-privilege DB users `autotrader_api` / `autotrader_worker` (ADR-019).
+- (Resolved in Phase 1) WebSocket client guarded by an allow-list equivalent to the HTTP one (ADR-018).
 - Entry gating is a placeholder (`entries_allowed=false`, reason `PHASE_0_NO_STRATEGY`).
 
-## Next: Phase 1 — ingestion and quality
-30m/1h backfill within the 5k cap with coverage report; `candles` table with provenance; persistent WS worker (ping, reconnect, REST backfill); gap/duplicate/OHLC validation; stale-data and oracle/mark health flags.
+## Phase 1 — Market Data Engine ✅ (see PHASE1_REPORT.md)
+| Gate item | State |
+|---|---|
+| 30m/1h backfill within the API cap, with coverage report | ✅ 5,008 / 5,004 closed bars, 0 missing |
+| Persistent WS worker: ping, stale detection, reconnect with backoff, REST gap fill | ✅ verified live (isolated 60 s outage) and in tests |
+| Restart / reconnect without loss or duplicates | ✅ live + tests |
+| Gap / duplicate / OHLC / outlier validation, recorded not hidden | ✅ |
+| Closed-bar-only reads (no look-ahead) | ✅ `closed_candles(as_of)` |
+| Provenance for all observations | ✅ `ingestion_runs` |
+| Health flags (stale data, WS state, heartbeat) | ✅ `/api/collector/status` |
+
+## Next: Phase 2 — Deterministic backtester (NOT started; awaiting owner approval)

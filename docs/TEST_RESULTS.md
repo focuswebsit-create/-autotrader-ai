@@ -1,4 +1,17 @@
-# Test Results — Phase 0 (2026-11-03)
+# Test Results
+
+## Phase 1 (2026-11-03, latest)
+```
+ruff check / format --check   -> clean
+mypy --strict                 -> Success: no issues found in 41 source files
+AUTOTRADER_TEST_DATABASE_URL=..._test RUN_LIVE_TESTS=1 uv run pytest
+                              -> 286 passed (262 unit, 20 PostgreSQL, 4 live mainnet)
+web: lint / typecheck / build -> ok
+```
+Live verification, outage test and security attempts: `docs/PHASE1_REPORT.md`.
+
+---
+# Phase 0 (2026-11-03)
 
 ## After QA review (latest)
 ```
