@@ -98,6 +98,16 @@ export default function StatusPanel() {
               </ul>
             )}
           </div>
+          {hb?.last_error && (
+            <p className="mt-2 text-xs err">
+              שגיאה נוכחית ({fmtUtc(hb.last_error_at, true)} UTC): <bdi dir="ltr">{hb.last_error}</bdi>
+            </p>
+          )}
+          {!hb?.last_error && hb?.recovered_error && (
+            <p className="mt-2 text-xs muted">
+              התאוששות אחרונה ({fmtUtc(hb.recovered_at, true)} UTC) משגיאה: <bdi dir="ltr">{hb.recovered_error}</bdi>
+            </p>
+          )}
           {frozen && <p className="mt-2 text-xs err">הנתונים בכרטיס זה אינם מתעדכנים כרגע.</p>}
         </div>
       )}

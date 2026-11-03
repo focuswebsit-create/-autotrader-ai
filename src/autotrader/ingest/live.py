@@ -77,12 +77,20 @@ class CollectorState:
     ignored_out_of_order: int = 0
     rejected: int = 0
     last_error: str | None = None
+    last_error_at: datetime | None = None
+    #: The last error the collector recovered from (kept for diagnostics).
+    recovered_error: str | None = None
+    recovered_at: datetime | None = None
     market_ctx: dict[str, Any] = field(default_factory=dict)
 
 
 Connector = Callable[[], Awaitable[WsConnection]]
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
 
 
 def utcnow() -> datetime:
@@ -117,6 +125,18 @@ class LiveCollector:
         self._fatal: SafetyViolationError | None = None
 
     # ------------------------------------------------------------------ helpers
+
+    def _set_error(self, message: str | None) -> None:
+        self.state.last_error = message
+        self.state.last_error_at = self.clock()
+
+    def _recovered(self) -> None:
+        """Called after a successful (re)connect / sync: the error is history now."""
+        if self.state.last_error is not None:
+            self.state.recovered_error = self.state.last_error
+            self.state.recovered_at = self.clock()
+            self.state.last_error = None
+            self.state.last_error_at = None
 
     def backoff_delay(self, attempt: int) -> float:
         """Exponential backoff with full jitter, capped."""
@@ -169,10 +189,10 @@ class LiveCollector:
                 )
                 ok = ok and all(r.ok for r in results)
                 if results and not results[-1].ok:
-                    self.state.last_error = results[-1].error
+                    self._set_error(results[-1].error)
             except SQLAlchemyError as exc:
                 ok = False
-                self.state.last_error = f"DATABASE: {type(exc).__name__}"
+                self._set_error(f"DATABASE: {type(exc).__name__}")
                 log.error("rest sync failed: database", extra={"interval": iv.value})
         self.state.last_sync_at = self.clock()
         self.state.last_sync_ok = ok
@@ -187,7 +207,7 @@ class LiveCollector:
         try:
             msg = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
-            self.state.last_error = "WS: non-JSON frame"
+            self._set_error("WS: non-JSON frame")
             return
         if not isinstance(msg, dict):
             return
@@ -202,7 +222,7 @@ class LiveCollector:
                     k: ctx.get(k) for k in ("markPx", "oraclePx", "midPx", "funding")
                 } | {"received_at": now.isoformat()}
         elif channel == "error":
-            self.state.last_error = f"WS error: {str(data)[:200]}"
+            self._set_error(f"WS error: {str(data)[:200]}")
             log.warning("ws error frame", extra={"data": str(data)[:200]})
         # "pong" and "subscriptionResponse" need no action beyond the timestamp.
 
@@ -260,6 +280,9 @@ class LiveCollector:
                         ),
                         "last_sync_ok": self.state.last_sync_ok,
                         "last_error": self.state.last_error,
+                        "last_error_at": _iso(self.state.last_error_at),
+                        "recovered_error": self.state.recovered_error,
+                        "recovered_at": _iso(self.state.recovered_at),
                         "market_ctx": self.state.market_ctx,
                     },
                 )
@@ -289,7 +312,7 @@ class LiveCollector:
                     raise
                 except Exception as exc:
                     # Any connection/protocol/DB problem: log, back off, reconnect.
-                    self.state.last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+                    self._set_error(f"{type(exc).__name__}: {str(exc)[:200]}")
                     log.warning("ws session ended", extra={"error": self.state.last_error})
                 if stop.is_set():
                     break
@@ -317,6 +340,7 @@ class LiveCollector:
                 await conn.send(json.dumps({"method": "subscribe", "subscription": sub}))
             self.state.ws_state = "CONNECTED"
             self.state.last_ws_message_at = self.clock()
+            self._recovered()
             log.info("ws connected", extra={"subscriptions": len(self.subscriptions())})
             # Fill anything missed while disconnected (REST is the source of truth).
             await asyncio.to_thread(self.sync_rest, force=True)
@@ -360,5 +384,5 @@ class LiveCollector:
                 stop.set()
                 return
             except Exception as exc:
-                self.state.last_error = f"sync: {type(exc).__name__}"
+                self._set_error(f"sync: {type(exc).__name__}")
                 log.exception("periodic sync failed")

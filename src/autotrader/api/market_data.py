@@ -159,6 +159,9 @@ def collector_status(session: Session, coin: str, now: datetime) -> dict[str, An
             "last_sync_at": details.get("last_sync_at"),
             "last_sync_ok": details.get("last_sync_ok"),
             "last_error": details.get("last_error"),
+            "last_error_at": details.get("last_error_at"),
+            "recovered_error": details.get("recovered_error"),
+            "recovered_at": details.get("recovered_at"),
             "market_ctx": details.get("market_ctx") or {},
         }
 

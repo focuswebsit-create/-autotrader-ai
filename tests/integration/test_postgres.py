@@ -311,18 +311,68 @@ def test_postgres_backfill_idempotent_and_exact(migrated: str, snapshot_30m: Any
 
 
 def test_single_collector_lock(migrated: str) -> None:
-    from autotrader.db.market_data import try_collector_lock
+    from autotrader.db.market_data import (
+        lock_still_held,
+        open_lock_connection,
+        release_collector_lock,
+        try_collector_lock,
+    )
 
-    sessions = sessionmaker(bind=create_engine(migrated))
-    a, b = sessions(), sessions()
+    engine = create_engine(migrated)
+    a, b = open_lock_connection(migrated), open_lock_connection(migrated)
     try:
         assert try_collector_lock(a) is True
+        assert lock_still_held(a) is True
         assert try_collector_lock(b) is False  # a second collector must refuse to start
+        # Holding the lock must not leave a transaction open ("idle in transaction").
+        with engine.connect() as c:
+            states = (
+                c.execute(
+                    text("SELECT state FROM pg_stat_activity WHERE datname = current_database()")
+                )
+                .scalars()
+                .all()
+            )
+        assert "idle in transaction" not in states
     finally:
-        a.close()
-        b.close()
-    c = sessions()
+        release_collector_lock(a)
+        release_collector_lock(b)
+    # Regression: a fresh connection (different backend) can take the lock again,
+    # i.e. releasing really released it (no pooled connection kept holding it).
+    c2 = open_lock_connection(migrated)
     try:
-        assert try_collector_lock(c) is True  # released when the holder disconnects
+        assert try_collector_lock(c2) is True
     finally:
-        c.close()
+        release_collector_lock(c2)
+    with engine.connect() as c:
+        assert (
+            c.execute(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype='advisory' "
+                    "AND database = (SELECT oid FROM pg_database "
+                    "WHERE datname = current_database())"
+                )
+            ).scalar_one()
+            == 0
+        )
+
+
+def test_lock_loss_is_detected(migrated: str) -> None:
+    """Simulates a DB-side disconnect of the lock holder (e.g. DB restart)."""
+    from autotrader.db.market_data import (
+        lock_still_held,
+        open_lock_connection,
+        release_collector_lock,
+        try_collector_lock,
+    )
+
+    engine = create_engine(migrated)
+    conn = open_lock_connection(migrated)
+    try:
+        assert try_collector_lock(conn)
+        pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        with engine.connect() as admin:
+            admin.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})
+        assert lock_still_held(conn) is False
+    finally:
+        release_collector_lock(conn)  # must not raise on a dead connection

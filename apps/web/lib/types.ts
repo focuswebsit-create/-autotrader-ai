@@ -70,6 +70,9 @@ export type CollectorStatus = {
     last_sync_at: string | null;
     last_sync_ok: boolean | null;
     last_error: string | null;
+    last_error_at: string | null;
+    recovered_error: string | null;
+    recovered_at: string | null;
     market_ctx: { markPx?: string; oraclePx?: string; midPx?: string; funding?: string; received_at?: string };
   };
   intervals: IntervalStatus[];

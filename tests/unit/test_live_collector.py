@@ -188,7 +188,10 @@ def test_disconnect_triggers_reconnect_and_rest_gap_fill(
     run_until(c, lambda: connector.attempts >= 2 and c.state.ws_state == "CONNECTED")
 
     assert c.state.reconnects >= 1
-    assert "ConnectionResetError" in (c.state.last_error or "")
+    # After a successful reconnect the error is history, not a current problem.
+    assert c.state.last_error is None
+    assert "ConnectionResetError" in (c.state.recovered_error or "")
+    assert c.state.recovered_at is not None
     with sqlite_sessions() as s:
         kinds = [r.kind for r in s.scalars(select(IngestionRun).order_by(IngestionRun.id))]
     # backfill at start, then a gap_fill after EACH (re)connect.
@@ -210,7 +213,7 @@ def test_stale_stream_is_detected_and_recycled(
 
     run_until(c, cond)
     assert silent.closed
-    assert "no WS data" in (c.state.last_error or "")
+    assert "no WS data" in (c.state.recovered_error or c.state.last_error or "")
     assert c.state.reconnects >= 1
 
 
@@ -221,6 +224,7 @@ def test_connect_failures_back_off_then_recover(
     c = make(sqlite_sessions, info, connector)
     run_until(c, lambda: c.state.ws_state == "CONNECTED")
     assert connector.attempts == 3 and c.state.reconnects == 2
+    assert c.state.last_error is None and "refused" in (c.state.recovered_error or "")
 
 
 def test_backoff_is_exponential_jittered_and_capped() -> None:

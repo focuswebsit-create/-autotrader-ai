@@ -23,8 +23,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
-from sqlalchemy import func, select, text
+from sqlalchemy import Connection, create_engine, func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from autotrader.db.models import (
     CandleRow,
@@ -499,13 +501,55 @@ def get_heartbeat(session: Session, service: str) -> ServiceHeartbeat | None:
     return session.get(ServiceHeartbeat, service)
 
 
-def try_collector_lock(session: Session) -> bool:
+def try_collector_lock(conn: Connection) -> bool:
     """Session-level advisory lock so two collectors never write concurrently.
 
+    ``conn`` must be a dedicated AUTOCOMMIT connection kept open for the life of
+    the collector (see :func:`open_lock_connection`): the lock lives as long as
+    that connection, and no transaction is left open ("idle in transaction").
     Returns True on non-PostgreSQL backends (tests).
     """
-    if session.get_bind().dialect.name != "postgresql":
+    if conn.dialect.name != "postgresql":
         return True
     return bool(
-        session.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": COLLECTOR_LOCK_KEY}).scalar()
+        conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": COLLECTOR_LOCK_KEY}).scalar()
     )
+
+
+def open_lock_connection(url: str) -> Connection:
+    """A dedicated, NON-pooled AUTOCOMMIT connection for the advisory lock.
+
+    Not pooled on purpose: closing a pooled connection only returns it to the
+    pool, where it would silently keep holding the session-level lock.
+    """
+    engine = create_engine(url, poolclass=NullPool)
+    return engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+
+
+def release_collector_lock(conn: Connection) -> None:
+    """Explicitly unlock, then really close the connection."""
+    try:
+        if conn.dialect.name == "postgresql":
+            conn.execute(text("SELECT pg_advisory_unlock_all()"))
+    except SQLAlchemyError:
+        pass  # connection already gone -> the server released the lock
+    finally:
+        conn.close()
+        conn.engine.dispose()
+
+
+def lock_still_held(conn: Connection) -> bool:
+    """False if the lock connection died (e.g. DB restart) and the lock was released."""
+    if conn.dialect.name != "postgresql":
+        return True
+    try:
+        held = conn.execute(
+            text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND pid = pg_backend_pid() AND objid = :lo AND classid = :hi AND granted"
+            ),
+            {"lo": COLLECTOR_LOCK_KEY & 0xFFFFFFFF, "hi": COLLECTOR_LOCK_KEY >> 32},
+        ).scalar()
+    except SQLAlchemyError:
+        return False
+    return bool(held)
