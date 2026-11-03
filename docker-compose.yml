@@ -29,6 +29,13 @@ services:
     build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
     environment: *backend_env
     ports: ["127.0.0.1:8000:8000"]
+    restart: unless-stopped
+    healthcheck:
+      # /health answers 503 when the database is down -> container reports unhealthy.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     depends_on: { migrate: { condition: service_completed_successfully } }
 
   worker:
@@ -43,7 +50,8 @@ services:
     environment:
       API_BASE_URL: http://api:8000
     ports: ["127.0.0.1:3000:3000"]
-    depends_on: [api]
+    restart: unless-stopped
+    depends_on: { api: { condition: service_healthy } }
 
 volumes:
   pgdata:

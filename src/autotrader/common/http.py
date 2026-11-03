@@ -9,6 +9,7 @@ authenticated trading endpoint) is blocked.
 
 from __future__ import annotations
 
+import json
 import time
 import urllib.request
 from types import TracebackType
@@ -53,6 +54,35 @@ class AllowlistTransport(httpx.BaseTransport):
         self._inner.close()
 
 
+#: Upper bound for a single Info response (largest Phase 0/1 payloads are ~1 MB).
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_RETRY_AFTER_S = 30.0
+
+
+def _retry_after_s(value: str | None) -> float:
+    """Seconds from a ``Retry-After`` header (delta-seconds form only), capped."""
+    if not value:
+        return 0.0
+    try:
+        return min(max(float(value), 0.0), MAX_RETRY_AFTER_S)
+    except ValueError:
+        return 0.0
+
+
+def _read_capped(response: httpx.Response) -> bytes:
+    declared = response.headers.get("Content-Length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES:
+        raise InfoApiError(f"Info API response too large ({declared} bytes)")
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in response.iter_bytes():
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            raise InfoApiError("Info API response exceeded size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class InfoApiError(RuntimeError):
     """Network / protocol failure talking to the Info API (not a safety violation)."""
 
@@ -80,31 +110,35 @@ class InfoClient:
     def info(self, payload: dict[str, Any]) -> Any:
         """POST ``payload`` to the Info endpoint and return parsed JSON.
 
-        Retries on transport errors, HTTP 429 and 5xx with exponential backoff.
-        Safety violations are never retried.
+        Retries on transport errors, HTTP 429 and 5xx with exponential backoff
+        (honouring ``Retry-After`` up to ``MAX_RETRY_AFTER_S``). Safety violations
+        are never retried. Responses larger than ``MAX_RESPONSE_BYTES`` are rejected
+        while streaming, before they are fully buffered.
         """
         last_error: Exception | None = None
         for attempt in range(self._max_attempts):
+            delay = self._backoff_s * (2**attempt)
             try:
-                response = self._client.post(INFO_URL, json=payload)
+                with self._client.stream("POST", INFO_URL, json=payload) as response:
+                    status = response.status_code
+                    if status == 429 or status >= 500:
+                        last_error = InfoApiError(f"HTTP {status} from Info API")
+                        delay = max(delay, _retry_after_s(response.headers.get("Retry-After")))
+                    else:
+                        body = _read_capped(response)
+                        if status != 200:
+                            snippet = body[:200].decode(errors="replace")
+                            raise InfoApiError(f"HTTP {status} from Info API: {snippet}")
+                        try:
+                            return json.loads(body)
+                        except ValueError as exc:
+                            raise InfoApiError("Info API returned invalid JSON") from exc
             except SafetyViolationError:
                 raise
             except httpx.HTTPError as exc:
                 last_error = exc
-            else:
-                if response.status_code == 429 or response.status_code >= 500:
-                    last_error = InfoApiError(f"HTTP {response.status_code} from Info API")
-                elif response.status_code != 200:
-                    raise InfoApiError(
-                        f"HTTP {response.status_code} from Info API: {response.text[:200]}"
-                    )
-                else:
-                    try:
-                        return response.json()
-                    except ValueError as exc:
-                        raise InfoApiError("Info API returned invalid JSON") from exc
             if attempt + 1 < self._max_attempts:
-                time.sleep(self._backoff_s * (2**attempt))
+                time.sleep(delay)
         raise InfoApiError(f"Info API unavailable after {self._max_attempts} attempts") from (
             last_error
         )

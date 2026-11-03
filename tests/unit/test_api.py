@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi.routing import APIRoute
@@ -73,6 +74,91 @@ def test_discovery_after_worker(sessions: sessionmaker[Session], fake_info: Fake
     assert body["discovery"]["mark_px"] == "94.913"
     assert body["entries_allowed"] is False
     assert body["last_failure_after_discovery"] is None
+
+
+def test_same_second_failure_is_surfaced_without_backdating(
+    sessions: sessionmaker[Session], fake_info: FakeInfo
+) -> None:
+    """Review M5: SQLite CURRENT_TIMESTAMP has 1s precision; ordering must use ids."""
+    assert run_discovery_once(Settings(), fake_info, sessions).ok
+    fake_info.responses["perpDexs"] = [None]
+    assert not run_discovery_once(Settings(), fake_info, sessions).ok
+    client = TestClient(create_app(Settings(), sessions))
+    body = client.get("/api/market/discovery").json()
+    assert body["state"] == "FAILED"
+    assert body["last_failure_after_discovery"]["code"] == "DEX_NOT_FOUND"
+
+
+def test_success_after_failure_is_current_again(
+    sessions: sessionmaker[Session], fake_info: FakeInfo, perp_dexs: Any
+) -> None:
+    fake_info.responses["perpDexs"] = [None]
+    assert not run_discovery_once(Settings(), fake_info, sessions).ok
+    fake_info.responses["perpDexs"] = perp_dexs
+    assert run_discovery_once(Settings(), fake_info, sessions).ok
+    body = TestClient(create_app(Settings(), sessions)).get("/api/market/discovery").json()
+    assert body["state"] == "CURRENT"
+    assert body["last_failure_after_discovery"] is None
+
+
+def test_failure_for_other_coin_is_ignored(
+    sessions: sessionmaker[Session], fake_info: FakeInfo
+) -> None:
+    from autotrader.db.repository import record_event
+
+    assert run_discovery_once(Settings(), fake_info, sessions).ok
+    with sessions.begin() as s:
+        record_event(s, "MARKET_DISCOVERY_FAILED", "ERROR", "x", {"code": "X"}, subject="xyz:GOLD")
+    body = TestClient(create_app(Settings(), sessions)).get("/api/market/discovery").json()
+    assert body["state"] == "CURRENT"
+
+
+def test_never_succeeded_reports_reason(
+    sessions: sessionmaker[Session], fake_info: FakeInfo
+) -> None:
+    fake_info.responses["perpDexs"] = [None]
+    run_discovery_once(Settings(), fake_info, sessions)
+    res = TestClient(create_app(Settings(), sessions)).get("/api/market/discovery")
+    assert res.status_code == 503
+    assert res.json()["detail"] == "DEX_NOT_FOUND"
+
+
+def test_unexpected_error_is_recorded_as_failure(
+    sessions: sessionmaker[Session], fake_info: FakeInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M1: non-DiscoveryError exceptions must not leave old data looking current."""
+    from autotrader.worker import discovery_job
+
+    assert run_discovery_once(Settings(), fake_info, sessions).ok
+
+    def explode(*a: Any, **k: Any) -> Any:
+        raise ArithmeticError("boom")
+
+    monkeypatch.setattr(discovery_job, "discover_market", explode)
+    outcome = run_discovery_once(Settings(), fake_info, sessions)
+    assert not outcome.ok and outcome.error_code == "UNEXPECTED_ERROR"
+    body = TestClient(create_app(Settings(), sessions)).get("/api/market/discovery").json()
+    assert body["state"] == "FAILED"
+
+
+def test_db_rejecting_data_is_recorded_as_failure(
+    sessions: sessionmaker[Session], fake_info: FakeInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy.exc import DataError
+
+    from autotrader.worker import discovery_job
+
+    assert run_discovery_once(Settings(), fake_info, sessions).ok
+
+    def reject(*a: Any, **k: Any) -> Any:
+        raise DataError("INSERT", {}, Exception("numeric field overflow"))
+
+    monkeypatch.setattr(discovery_job, "save_discovery", reject)
+    outcome = run_discovery_once(Settings(), fake_info, sessions)
+    assert not outcome.ok and outcome.error_code == "DB_REJECTED"
+    assert outcome.persisted is True  # the failure itself was stored
+    body = TestClient(create_app(Settings(), sessions)).get("/api/market/discovery").json()
+    assert body["state"] == "FAILED"
 
 
 def test_failure_after_discovery_is_surfaced(

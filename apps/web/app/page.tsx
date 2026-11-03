@@ -1,6 +1,6 @@
 import AutoRefresh from "./AutoRefresh";
 import { explain } from "@/lib/i18n";
-import { getDiscovery, getHealth } from "@/lib/api";
+import { getDiscovery, getHealth, getMode, type DiscoveryState } from "@/lib/api";
 
 // Always render from live backend state; never prerender static values.
 export const dynamic = "force-dynamic";
@@ -44,8 +44,85 @@ function ErrorText({ code }: { code: string }) {
   );
 }
 
+function formatAge(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)} שניות`;
+  if (seconds < 90 * 60) return `${Math.round(seconds / 60)} דקות`;
+  return `${Math.round(seconds / 3600)} שעות`;
+}
+
+const STATE_BADGE: Record<DiscoveryState, { tone: "ok" | "warn" | "bad"; label: string }> = {
+  CURRENT: { tone: "ok", label: "עדכני" },
+  STALE: { tone: "warn", label: "נתונים ישנים" },
+  FAILED: { tone: "bad", label: "האיתור האחרון נכשל" },
+};
+
+function MarketDetails({ data }: { data: import("@/lib/api").DiscoveryResponse }) {
+  const d = data.discovery;
+  const current = data.state === "CURRENT";
+  const badge = STATE_BADGE[data.state];
+  // Values that are not from a fresh, successful cycle are labelled "last known".
+  const suffix = current ? "" : " (אחרון ידוע)";
+  return (
+    <>
+      {!current && (
+        <p
+          role="alert"
+          className="mb-3 rounded-lg border px-3 py-2 text-sm"
+          style={{ color: `var(--${badge.tone})`, borderColor: `var(--${badge.tone})` }}
+        >
+          {data.state === "FAILED" && data.last_failure_after_discovery
+            ? explain(data.last_failure_after_discovery.code)
+            : "לא התקבל עדכון חדש מהשרת."}{" "}
+          הערכים למטה הם הערכים האחרונים שנמדדו לפני {formatAge(data.age_seconds)}, ואינם מחירים
+          עדכניים.
+        </p>
+      )}
+      <dl style={current ? undefined : { opacity: 0.6 }}>
+        <Row label="סטטוס" value={<Badge tone={badge.tone}>{badge.label}</Badge>} />
+        <Row
+          label={`מצב השוק${suffix}`}
+          value={
+            d.status === "ACTIVE" ? (
+              <Badge tone="ok">פעיל</Badge>
+            ) : (
+              <Badge tone="warn">פגום חלקית</Badge>
+            )
+          }
+        />
+        <Row label={`מחיר Mark${suffix}`} value={d.mark_px} ltr />
+        <Row label={`מחיר Oracle${suffix}`} value={d.oracle_px} ltr />
+        <Row label="פער Mark/Oracle" value={`${d.oracle_mark_divergence_bps} bps`} ltr />
+        <Row label="Funding (שעתי)" value={d.funding_rate} ltr />
+        <Row label="מינוף מקסימלי בבורסה" value={`${d.max_leverage}x`} ltr />
+        <Row label="דיוק כמות / מחיר" value={`${d.sz_decimals} / ${d.max_price_decimals}`} ltr />
+        <Row
+          label="זמן איתור (UTC)"
+          value={new Date(d.discovered_at).toISOString().replace("T", " ").slice(0, 19)}
+          ltr
+        />
+        <Row label="גיל הנתונים" value={formatAge(data.age_seconds)} />
+      </dl>
+      {d.warnings.length > 0 && (
+        <ul className="mt-2 list-disc ps-5 text-xs" style={{ color: "var(--warn)" }} dir="ltr">
+          {d.warnings.map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-3 text-xs" style={{ color: "var(--muted)" }}>
+        כניסות לעסקאות: חסומות. {explain(data.entries_blocked_reason)}
+      </p>
+    </>
+  );
+}
+
 export default async function Home() {
-  const [health, discovery] = await Promise.all([getHealth(), getDiscovery()]);
+  const [health, discovery, mode] = await Promise.all([getHealth(), getDiscovery(), getMode()]);
+  const coin = discovery.ok
+    ? discovery.data.discovery.coin
+    : mode.ok
+      ? mode.data.market.coin
+      : null;
   const renderedAt = new Date().toISOString().replace("T", " ").slice(0, 19);
 
   return (
@@ -85,51 +162,13 @@ export default async function Home() {
       <Card
         title={
           <>
-            שוק <bdi dir="ltr">xyz:CL</bdi> · נפט <bdi dir="ltr">WTI</bdi> · <bdi dir="ltr">HIP-3</bdi>
+            שוק <bdi dir="ltr">{coin ?? "—"}</bdi> · נפט <bdi dir="ltr">WTI</bdi> ·{" "}
+            <bdi dir="ltr">HIP-3</bdi>
           </>
         }
       >
         {discovery.ok ? (
-          <>
-            <dl>
-              <Row
-                label="סטטוס"
-                value={
-                  discovery.data.stale ? (
-                    <Badge tone="warn">נתונים ישנים</Badge>
-                  ) : discovery.data.discovery.status === "ACTIVE" ? (
-                    <Badge tone="ok">פעיל</Badge>
-                  ) : (
-                    <Badge tone="warn">פגום חלקית</Badge>
-                  )
-                }
-              />
-              <Row label="מחיר Mark" value={discovery.data.discovery.mark_px} ltr />
-              <Row label="מחיר Oracle" value={discovery.data.discovery.oracle_px} ltr />
-              <Row label="פער Mark/Oracle" value={`${discovery.data.discovery.oracle_mark_divergence_bps} bps`} ltr />
-              <Row label="Funding (שעתי)" value={discovery.data.discovery.funding_rate} ltr />
-              <Row label="מינוף מקסימלי בבורסה" value={`${discovery.data.discovery.max_leverage}x`} ltr />
-              <Row label="דיוק כמות / מחיר" value={`${discovery.data.discovery.sz_decimals} / ${discovery.data.discovery.max_price_decimals}`} ltr />
-              <Row
-                label="זמן איתור (UTC)"
-                value={new Date(discovery.data.discovery.discovered_at).toISOString().replace("T", " ").slice(0, 19)}
-                ltr
-              />
-            </dl>
-            {discovery.data.discovery.warnings.length > 0 && (
-              <ul className="mt-2 list-disc ps-5 text-xs" style={{ color: "var(--warn)" }} dir="ltr">
-                {discovery.data.discovery.warnings.map((w) => (
-                  <li key={w}>{w}</li>
-                ))}
-              </ul>
-            )}
-            {discovery.data.last_failure_after_discovery && (
-              <ErrorText code={discovery.data.last_failure_after_discovery.code} />
-            )}
-            <p className="mt-3 text-xs" style={{ color: "var(--muted)" }}>
-              כניסות לעסקאות: חסומות. {explain(discovery.data.entries_blocked_reason)}
-            </p>
-          </>
+          <MarketDetails data={discovery.data} />
         ) : (
           <ErrorText code={discovery.error} />
         )}

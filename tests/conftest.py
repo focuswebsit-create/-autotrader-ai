@@ -44,6 +44,29 @@ def fake_info(perp_dexs: Any, meta_xyz: Any) -> FakeInfo:
     return FakeInfo({"perpDexs": perp_dexs, "metaAndAssetCtxs": meta_xyz})
 
 
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+@pytest.fixture(autouse=True)
+def _block_external_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-live tests must never reach the internet (only localhost, e.g. PostgreSQL)."""
+    if request.node.get_closest_marker("live"):
+        return
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def guarded_connect(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else None
+        if host is not None and host not in _LOCAL_HOSTS:
+            raise RuntimeError(f"external network access in a non-live test: {address!r}")
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     from autotrader.common.config import get_settings

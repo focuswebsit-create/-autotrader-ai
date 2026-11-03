@@ -161,3 +161,76 @@ def test_divergence_bps_math() -> None:
     assert divergence_bps(Decimal("101"), Decimal("100")) == Decimal("100.00")
     assert divergence_bps(Decimal("99"), Decimal("100")) == Decimal("100.00")
     assert divergence_bps(Decimal("94.913"), Decimal("94.9")) == Decimal("1.37")
+
+
+# ---------------------------------------------------------------- review regressions (M1, L2)
+
+
+def _with_ctx(fake_info: FakeInfo, meta_xyz: Any, **fields: Any) -> None:
+    meta = copy.deepcopy(meta_xyz)
+    meta[1][_cl_index(meta)].update(fields)
+    fake_info.responses["metaAndAssetCtxs"] = meta
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"markPx": "1e40", "oraclePx": "1e-30"},  # used to raise decimal.InvalidOperation
+        {"markPx": "1e25", "oraclePx": "1e25"},  # used to overflow NUMERIC(38,18) on insert
+        {"markPx": "1e-12", "oraclePx": "1e-12"},  # below storable precision
+        {"funding": "0.5"},
+        {"funding": "-0.06"},
+        {"openInterest": "-1"},
+        {"openInterest": "1e20"},
+        {"markPx": "300", "oraclePx": "94.9"},  # > 100% divergence: corrupt, not "degraded"
+    ],
+)
+def test_out_of_range_values_fail_closed(
+    fake_info: FakeInfo, meta_xyz: Any, fields: dict[str, str]
+) -> None:
+    _with_ctx(fake_info, meta_xyz, **fields)
+    with pytest.raises(DiscoveryError) as e:
+        discover_market(fake_info)
+    assert e.value.code == DiscoveryErrorCode.OUT_OF_RANGE
+
+
+@pytest.mark.parametrize("mid", ["0", "-1"])
+def test_non_positive_mid_degrades(fake_info: FakeInfo, meta_xyz: Any, mid: str) -> None:
+    _with_ctx(fake_info, meta_xyz, midPx=mid)
+    d = discover_market(fake_info)
+    assert d.status == "DEGRADED"
+    assert any(w.startswith("INVALID_MID_PRICE") for w in d.warnings)
+
+
+def test_zero_open_interest_degrades(fake_info: FakeInfo, meta_xyz: Any) -> None:
+    _with_ctx(fake_info, meta_xyz, openInterest="0")
+    assert discover_market(fake_info).warnings == ["ZERO_OPEN_INTEREST"]
+
+
+def test_duplicate_dex_is_ambiguous(fake_info: FakeInfo, perp_dexs: Any) -> None:
+    fake_info.responses["perpDexs"] = [*perp_dexs, {"name": "xyz", "fullName": "Impostor"}]
+    with pytest.raises(DiscoveryError) as e:
+        discover_market(fake_info)
+    assert e.value.code == DiscoveryErrorCode.DEX_AMBIGUOUS
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("szDecimals", True), ("szDecimals", "3"), ("maxLeverage", "20"), ("isDelisted", "false")],
+)
+def test_no_silent_type_coercion(
+    fake_info: FakeInfo, meta_xyz: Any, field: str, value: object
+) -> None:
+    meta = copy.deepcopy(meta_xyz)
+    meta[0]["universe"][_cl_index(meta)][field] = value
+    fake_info.responses["metaAndAssetCtxs"] = meta
+    with pytest.raises(DiscoveryError) as e:
+        discover_market(fake_info)
+    assert e.value.code == DiscoveryErrorCode.MALFORMED_RESPONSE
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", True])
+def test_non_finite_prices_rejected(fake_info: FakeInfo, meta_xyz: Any, value: object) -> None:
+    _with_ctx(fake_info, meta_xyz, markPx=value)
+    with pytest.raises(DiscoveryError):
+        discover_market(fake_info)

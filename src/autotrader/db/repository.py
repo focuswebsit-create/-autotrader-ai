@@ -55,21 +55,32 @@ def record_event(
     severity: str,
     message: str,
     details: dict[str, Any] | None = None,
+    *,
+    subject: str | None = None,
 ) -> SystemEvent:
     event = SystemEvent(
-        event_type=event_type, severity=severity, message=message, details=details or {}
+        event_type=event_type,
+        severity=severity,
+        message=message,
+        details=details or {},
+        subject=subject,
     )
     session.add(event)
     return event
 
 
-def latest_event(session: Session, event_type: str) -> SystemEvent | None:
-    stmt = (
-        select(SystemEvent)
-        .where(SystemEvent.event_type == event_type)
-        .order_by(SystemEvent.occurred_at.desc(), SystemEvent.id.desc())
-        .limit(1)
-    )
+def latest_event(
+    session: Session, event_type: str, subject: str | None = None
+) -> SystemEvent | None:
+    """Most recent event of a type (optionally for one subject, e.g. a coin).
+
+    Ordered by the monotonically increasing primary key, i.e. insertion order, so
+    the result never depends on clock precision or worker/DB clock skew.
+    """
+    stmt = select(SystemEvent).where(SystemEvent.event_type == event_type)
+    if subject is not None:
+        stmt = stmt.where(SystemEvent.subject == subject)
+    stmt = stmt.order_by(SystemEvent.id.desc()).limit(1)
     return session.execute(stmt).scalar_one_or_none()
 
 

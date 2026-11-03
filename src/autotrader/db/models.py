@@ -80,6 +80,8 @@ class SystemEvent(Base):
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    #: What the event is about (e.g. the market "xyz:CL"); NULL for system-wide events.
+    subject: Mapped[str | None] = mapped_column(String(64))
     severity: Mapped[str] = mapped_column(String(16), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     details: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False, default=dict)
@@ -92,6 +94,7 @@ class SystemEvent(Base):
             "severity IN ('DEBUG','INFO','WARNING','ERROR','CRITICAL')",
             name="ck_system_events_severity",
         ),
+        Index("ix_system_events_type_subject_id", "event_type", "subject", "id"),
     )
 
 

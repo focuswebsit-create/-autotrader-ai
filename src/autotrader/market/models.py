@@ -31,12 +31,13 @@ class PerpDex(_Lenient):
 
 class AssetMeta(_Lenient):
     name: str
-    sz_decimals: int = Field(alias="szDecimals", ge=0, le=PERP_MAX_DECIMALS)
-    max_leverage: int = Field(alias="maxLeverage", gt=0)
+    # strict: reject bools/strings ("20", true) instead of silently coercing them
+    sz_decimals: int = Field(alias="szDecimals", ge=0, le=PERP_MAX_DECIMALS, strict=True)
+    max_leverage: int = Field(alias="maxLeverage", gt=0, le=1000, strict=True)
     margin_table_id: int | None = Field(default=None, alias="marginTableId")
-    only_isolated: bool = Field(default=False, alias="onlyIsolated")
+    only_isolated: bool = Field(default=False, alias="onlyIsolated", strict=True)
     margin_mode: str | None = Field(default=None, alias="marginMode")
-    is_delisted: bool = Field(default=False, alias="isDelisted")
+    is_delisted: bool = Field(default=False, alias="isDelisted", strict=True)
     growth_mode: str | None = Field(default=None, alias="growthMode")
     deployer_fee_scale: Decimal | None = Field(default=None, alias="deployerFeeScale")
 

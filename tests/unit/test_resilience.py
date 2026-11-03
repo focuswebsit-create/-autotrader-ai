@@ -79,8 +79,26 @@ def test_interval_loop_survives_unexpected_errors(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(worker_main, "InfoClient", _Ctx(src))
     monkeypatch.setattr(worker_main.time, "sleep", lambda s: None)
     code = worker_main.main(["--interval", "1"], max_iterations=3)
-    assert code == worker_main.EXIT_UNEXPECTED
+    # An unknown error inside discovery is classified as a (recorded) failure.
+    assert code == worker_main.EXIT_DISCOVERY_FAILED
     assert src.calls == 3  # kept running after each failure
+
+
+def test_interval_loop_survives_errors_outside_discovery(
+    monkeypatch: pytest.MonkeyPatch, fake_info: FakeInfo
+) -> None:
+    monkeypatch.delenv("AUTOTRADER_DATABASE_URL", raising=False)
+    monkeypatch.setattr(worker_main, "InfoClient", _Ctx(fake_info))
+    monkeypatch.setattr(worker_main.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def boom(*a: Any, **k: Any) -> Any:
+        calls["n"] += 1
+        raise RuntimeError("bug outside discovery")
+
+    monkeypatch.setattr(worker_main, "run_discovery_once", boom)
+    assert worker_main.main(["--interval", "1"], max_iterations=2) == worker_main.EXIT_UNEXPECTED
+    assert calls["n"] == 2
 
 
 def test_interval_loop_stops_on_safety_violation(

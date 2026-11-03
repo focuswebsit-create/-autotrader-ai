@@ -17,6 +17,8 @@ const csp = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
+  // Self-contained server bundle for a small runtime image (infra/docker/web.Dockerfile).
+  output: "standalone",
   poweredByHeader: false,
   reactStrictMode: true,
   async headers() {

@@ -30,8 +30,11 @@ export type Discovery = {
   source: string;
 };
 
+export type DiscoveryState = "CURRENT" | "STALE" | "FAILED";
+
 export type DiscoveryResponse = {
   discovery: Discovery;
+  state: DiscoveryState;
   age_seconds: number;
   stale: boolean;
   last_failure_after_discovery: { occurred_at: string; code: string; message: string } | null;
@@ -68,4 +71,11 @@ async function getJson<T>(path: string, okStatuses: number[] = []): Promise<Resu
 
 // /health answers 503 with a full body when degraded; that body is still the real state.
 export const getHealth = () => getJson<Health>("/health", [503]);
+export type SystemMode = {
+  trading_mode: "PAPER";
+  live_trading_available: false;
+  market: { dex: string; coin: string };
+};
+
+export const getMode = () => getJson<SystemMode>("/api/system/mode");
 export const getDiscovery = () => getJson<DiscoveryResponse>("/api/market/discovery");

@@ -45,3 +45,24 @@ Python ≥3.12 (CI on 3.12) with `uv` + `uv.lock`; FastAPI, Pydantic v2, SQLAlch
 
 ## ADR-009 — Proxy-aware transport (2026-11-03)
 httpx ignores proxy env vars when a custom transport is used. `_default_inner_transport()` resolves `HTTPS_PROXY`/`NO_PROXY` explicitly (CA bundle via `SSL_CERT_FILE`). The allow-list check still runs first.
+
+## ADR-010 — Database guards are tripwires; runtime role separation is deferred (QA 2026-11-03)
+**Context.** QA review (M2) showed `paper_only` could be renamed away and guarded tables truncated.
+**Decision.** Migration `0002_hardening` blocks renaming the `paper_only` row and `TRUNCATE` on `system_config` / `audit_log`. The application connects as the table owner, so a privileged SQL user can still `ALTER`/`DROP` the guards. Nothing in the code reads `system_config.paper_only`: the real enforcement is in code (ADR-001/002). **Before any shared deployment** the API and worker must use a separate, non-owner role (DML only). This is tracked in STATUS.md.
+
+## ADR-011 — Sanity bounds on market data (QA 2026-11-03)
+Discovery fails closed with `OUT_OF_RANGE` when:
+- mark or oracle price is outside [1e-8, 1e9];
+- |funding| > 5% per hour;
+- open interest is outside [0, 1e15];
+- mark/oracle divergence exceeds 10,000 bps.
+
+Divergence above the configured limit (default 50 bps) but below that hard cap only marks the market `DEGRADED`. The bounds guarantee storable values (NUMERIC(38,18)) and prevent `decimal` arithmetic errors. Integer and boolean metadata fields are validated strictly (no `"20"` → 20 or `true` → 1 coercion). A duplicate dex name gives `DEX_AMBIGUOUS`.
+
+## ADR-012 — Discovery state is ordered by event id, per market (QA 2026-11-03)
+`system_events.subject` stores the market. The API compares the latest `MARKET_DISCOVERY_OK` and `MARKET_DISCOVERY_FAILED` events **by primary key**, not by timestamps from two different clocks (worker vs DB `now()`, 1-second SQLite precision). It returns `state = CURRENT | STALE | FAILED`. The UI labels non-current values as "last known" and never shows a green "current" badge after a failure.
+
+Any unexpected exception during discovery, or the DB rejecting the data (`DB_REJECTED`), is recorded as a failure. A DB *outage* is logged and reported as `persisted=false` (worker exit code 3).
+
+## ADR-013 — Destructive DB tests require an explicit `*_test` database (QA 2026-11-03)
+`tests/integration/test_postgres.py` drops all tables. It only runs with `AUTOTRADER_TEST_DATABASE_URL` pointing to a database whose name ends in `_test`. Non-live tests are also blocked from opening any non-localhost socket (`tests/conftest.py`).

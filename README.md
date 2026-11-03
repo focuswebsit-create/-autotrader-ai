@@ -73,6 +73,12 @@ cd apps/web && npm ci && API_BASE_URL=http://localhost:8000 npm run dev
 uv run ruff check src tests && uv run mypy && uv run pytest
 ```
 
+PostgreSQL tests drop and recreate tables, so they only run against a dedicated database whose name ends in `_test`:
+
+```bash
+AUTOTRADER_TEST_DATABASE_URL=postgresql+psycopg://USER:PASS@localhost:5432/autotrader_test uv run pytest -m db
+```
+
 ```bash
 RUN_LIVE_TESTS=1 uv run pytest -m live -s
 ```

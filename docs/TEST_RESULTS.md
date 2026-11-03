@@ -1,5 +1,21 @@
 # Test Results — Phase 0 (2026-11-03)
 
+## After QA review (latest)
+```
+uv run ruff check src tests            -> All checks passed!
+uv run ruff format --check src tests   -> 40 files already formatted
+uv run mypy                            -> Success: no issues found in 30 source files (strict)
+uv run autotrader safety-check         -> ok
+alembic upgrade head / downgrade base / upgrade head (0001 -> 0002) -> ok
+AUTOTRADER_TEST_DATABASE_URL=..._test RUN_LIVE_TESTS=1 uv run pytest --cov=autotrader
+                                       -> 178 passed (incl. 10 PostgreSQL, 3 live mainnet), coverage 97%
+web: npm run lint / typecheck / build  -> ok (standalone output)
+```
+Fault injection and browser checks: see `docs/QA_REVIEW_PHASE0.md`.
+
+---
+Initial Phase 0 results (before QA review):
+
 Environment: Linux cloud dev container, Python 3.12.3 (also 3.13), PostgreSQL 16 (local), Node 22, Next.js 16.4.4.
 
 ## Backend (CI-equivalent sequence)

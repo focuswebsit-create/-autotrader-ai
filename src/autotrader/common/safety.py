@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Mapping
 from typing import Final, Literal
 from urllib.parse import urlsplit
@@ -51,21 +52,30 @@ ALLOWED_INFO_TYPES: Final[frozenset[str]] = frozenset(
 #: Path fragments that must never be requested (authenticated / signed actions).
 FORBIDDEN_PATH_FRAGMENTS: Final[tuple[str, ...]] = ("/exchange",)
 
-#: Environment variable name fragments that indicate signing material.
-#: If any env var name contains one of these (case-insensitive) startup fails.
+#: Env var *names* are normalised (uppercase, separators removed) and must not
+#: contain any of these fragments.
 FORBIDDEN_ENV_FRAGMENTS: Final[tuple[str, ...]] = (
-    "PRIVATE_KEY",
+    "PRIVATEKEY",
     "PRIVKEY",
-    "SECRET_KEY_HL",
     "MNEMONIC",
-    "SEED_PHRASE",
-    "WALLET_KEY",
-    "AGENT_KEY",
-    "API_WALLET",
-    "HL_SECRET",
-    "HYPERLIQUID_SECRET",
-    "HYPERLIQUID_KEY",
+    "SEEDPHRASE",
+    "WALLET",
+    "SIGNER",
+    "AGENTKEY",
+    "AGENTSECRET",
+    "ETHKEY",
+    "MASTERKEY",
 )
+#: Whole-token names (split on separators) that are forbidden, e.g. ``HL_PK``.
+FORBIDDEN_ENV_TOKENS: Final[frozenset[str]] = frozenset({"PK", "PRIV"})
+#: Exchange-namespaced names: forbidden when combined with a credential-like token.
+EXCHANGE_ENV_TOKENS: Final[frozenset[str]] = frozenset({"HL", "HYPERLIQUID"})
+CREDENTIAL_ENV_TOKENS: Final[frozenset[str]] = frozenset(
+    {"KEY", "SECRET", "PK", "TOKEN", "PASSWORD", "SEED", "PRIVATE"}
+)
+#: Values that look like an Ethereum private key or a BIP-39 mnemonic.
+_HEX_KEY_RE: Final = re.compile(r"(0x)?[0-9a-fA-F]{64}")
+_MNEMONIC_RE: Final = re.compile(r"[a-z]+(\s+[a-z]+){11,23}")
 
 #: Mode-like env vars: if set, they must equal ``PAPER``.
 MODE_ENV_VARS: Final[tuple[str, ...]] = ("TRADING_MODE", "AUTOTRADER_TRADING_MODE")
@@ -92,7 +102,9 @@ def check_request_allowed(method: str, url: str, body: bytes | None) -> None:
             raise SafetyViolationError(f"Forbidden endpoint blocked (PAPER-ONLY): {url}")
     if parts.scheme != INFO_SCHEME or parts.hostname != INFO_HOST or parts.port not in (None, 443):
         raise SafetyViolationError(f"Host not on allow-list: {url}")
-    if path != INFO_PATH or parts.query or parts.fragment:
+    if parts.username is not None or parts.password is not None:
+        raise SafetyViolationError("Credentials in URL are not allowed")
+    if path != INFO_PATH or "?" in url or "#" in url:
         raise SafetyViolationError(f"Path not on allow-list: {url}")
     if method.upper() != "POST":
         raise SafetyViolationError(f"Method not allowed: {method}")
@@ -112,22 +124,41 @@ def check_request_allowed(method: str, url: str, body: bytes | None) -> None:
         raise SafetyViolationError(f"Info request type not allowed: {req_type!r}")
 
 
+def _forbidden_env_name(name: str) -> bool:
+    upper = name.upper()
+    tokens = {t for t in re.split(r"[^A-Z0-9]+", upper) if t}
+    normalised = "".join(re.split(r"[^A-Z0-9]+", upper))
+    if any(fragment in normalised for fragment in FORBIDDEN_ENV_FRAGMENTS):
+        return True
+    if tokens & FORBIDDEN_ENV_TOKENS:
+        return True
+    return bool(tokens & EXCHANGE_ENV_TOKENS and tokens & CREDENTIAL_ENV_TOKENS)
+
+
+def _forbidden_env_value(value: str) -> bool:
+    stripped = value.strip()
+    return bool(_HEX_KEY_RE.fullmatch(stripped) or _MNEMONIC_RE.fullmatch(stripped))
+
+
 def check_environment(env: Mapping[str, str] | None = None) -> None:
-    """Refuse to run if env contains signing material or a non-PAPER mode."""
+    """Refuse to run if env contains signing material or a non-PAPER mode.
+
+    Checks variable *names* (key/wallet/signer-like) and *values* (64-hex private
+    key, 12-24 word mnemonic). Values are never echoed in the error message.
+    """
     environ = os.environ if env is None else env
-    for name in environ:
-        upper = name.upper()
-        for fragment in FORBIDDEN_ENV_FRAGMENTS:
-            if fragment in upper:
-                raise SafetyViolationError(
-                    f"Environment variable '{name}' looks like wallet/signing material. "
-                    "AutoTrader AI is PAPER-ONLY and must never receive keys."
-                )
-    for var in MODE_ENV_VARS:
-        value = environ.get(var)
-        if value is not None and value.strip().upper() != TRADING_MODE:
+    for name, value in environ.items():
+        if _forbidden_env_name(name) or _forbidden_env_value(value):
             raise SafetyViolationError(
-                f"{var}={value!r} is not allowed. The only supported mode is PAPER."
+                f"Environment variable '{name}' looks like wallet/signing material. "
+                "AutoTrader AI is PAPER-ONLY and must never receive keys."
+            )
+    for var in MODE_ENV_VARS:
+        mode_value = environ.get(var)
+        # Exact match only, consistent with Settings.trading_mode (Literal["PAPER"]).
+        if mode_value is not None and mode_value != TRADING_MODE:
+            raise SafetyViolationError(
+                f"{var}={mode_value!r} is not allowed. The only supported mode is PAPER."
             )
 
 

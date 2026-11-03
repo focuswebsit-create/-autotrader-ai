@@ -57,8 +57,53 @@ def test_no_live_mode_literal_in_source() -> None:
     assert offenders == []
 
 
-def test_only_info_client_creates_http_clients() -> None:
+NETWORK_MODULES = (
+    "httpx",
+    "requests",
+    "aiohttp",
+    "urllib.request",
+    "urllib3",
+    "http.client",
+    "websockets",
+    "websocket",
+    "socket",
+    "ssl",
+)
+_NET_IMPORT = re.compile(
+    r"^\s*(?:from\s+(?P<from>[\w.]+)\s+import|import\s+(?P<imp>[\w., ]+))", re.MULTILINE
+)
+
+
+def _imported_modules(text: str) -> set[str]:
+    mods: set[str] = set()
+    for m in _NET_IMPORT.finditer(text):
+        if m.group("from"):
+            mods.add(m.group("from"))
+        else:
+            mods.update(part.strip().split(" ")[0] for part in m.group("imp").split(","))
+    return mods
+
+
+def test_only_http_module_may_import_network_libraries() -> None:
+    """Review L1: every network-capable import must live in common/http.py (guarded)."""
     allowed = {SRC / "common" / "http.py"}
-    pattern = re.compile(r"httpx\.(Client|AsyncClient|post|get|request|stream)\(")
-    offenders = [str(p) for p in _py_files() if p not in allowed and pattern.search(p.read_text())]
+    offenders = []
+    for path in _py_files():
+        if path in allowed:
+            continue
+        for mod in _imported_modules(path.read_text()):
+            if any(mod == n or mod.startswith(n + ".") for n in NETWORK_MODULES):
+                offenders.append(f"{path.relative_to(ROOT)}: {mod}")
+    assert offenders == []
+
+
+def test_no_dynamic_imports_or_string_built_endpoints() -> None:
+    """Defence in depth against obfuscation like '/ex' + 'change' or __import__('httpx')."""
+    patterns = [
+        re.compile(r"__import__\("),
+        re.compile(r"importlib\.import_module\("),
+        re.compile(r"""["']/?ex["']\s*\+"""),
+        re.compile(r"""["']change["']"""),
+    ]
+    offenders = [str(p) for p in _py_files() if any(pat.search(p.read_text()) for pat in patterns)]
     assert offenders == []

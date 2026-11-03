@@ -28,6 +28,7 @@ jobs:
           --health-timeout 5s --health-retries 20
     env:
       AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader:ci-only@localhost:5432/autotrader_test
+      AUTOTRADER_TEST_DATABASE_URL: postgresql+psycopg://autotrader:ci-only@localhost:5432/autotrader_test
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
@@ -63,3 +64,18 @@ jobs:
       - run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate compose file
+        run: cp .env.example .env && docker compose config -q
+      - name: Build backend image
+        run: docker build -f infra/docker/backend.Dockerfile -t autotrader-backend:ci .
+      - name: Backend image safety check (runs as non-root, PAPER only)
+        run: |
+          test "$(docker run --rm autotrader-backend:ci id -u)" != "0"
+          docker run --rm autotrader-backend:ci autotrader safety-check
+      - name: Build web image
+        run: docker build -f infra/docker/web.Dockerfile -t autotrader-web:ci .

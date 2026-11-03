@@ -89,34 +89,50 @@ def create_app(
     def market_discovery() -> dict[str, Any]:
         if sessions is None:
             raise HTTPException(status_code=503, detail="DATABASE_NOT_CONFIGURED")
+        coin = settings.market_coin
         try:
             with sessions() as s:
-                row = latest_discovery(s, settings.market_coin)
-                failure = latest_event(s, "MARKET_DISCOVERY_FAILED")
+                row = latest_discovery(s, coin)
+                ok_event = latest_event(s, "MARKET_DISCOVERY_OK", coin)
+                failure = latest_event(s, "MARKET_DISCOVERY_FAILED", coin)
         except SQLAlchemyError as exc:
             raise HTTPException(status_code=503, detail="DATABASE_UNAVAILABLE") from exc
         if row is None:
+            if failure is not None:
+                # Never succeeded: surface the real reason instead of "not yet".
+                raise HTTPException(status_code=503, detail=failure.details.get("code"))
             raise HTTPException(status_code=404, detail="NO_DISCOVERY_YET")
         now = datetime.now(tz=UTC)
         discovered_at = row.discovered_at
         if discovered_at.tzinfo is None:
             discovered_at = discovered_at.replace(tzinfo=UTC)
-        age_s = (now - discovered_at).total_seconds()
+        age_s = max((now - discovered_at).total_seconds(), 0.0)
+        # Ordering by insertion id (same table, same sequence) rather than by
+        # timestamps: immune to clock precision and worker/DB clock skew.
         last_failure = None
-        if failure is not None:
+        if failure is not None and (ok_event is None or failure.id > ok_event.id):
             occurred = failure.occurred_at
             if occurred.tzinfo is None:
                 occurred = occurred.replace(tzinfo=UTC)
-            if occurred > discovered_at:
-                last_failure = {
-                    "occurred_at": occurred.isoformat(),
-                    "code": failure.details.get("code"),
-                    "message": failure.message,
-                }
+            last_failure = {
+                "occurred_at": occurred.isoformat(),
+                "code": failure.details.get("code"),
+                "message": failure.message,
+            }
+        stale = age_s > DISCOVERY_STALE_AFTER_S
+        if last_failure is not None:
+            state = "FAILED"
+        elif stale:
+            state = "STALE"
+        else:
+            state = "CURRENT"
         return {
             "discovery": row.payload,
+            # CURRENT: latest cycle succeeded and is fresh. STALE/FAILED: the values
+            # below are the last known ones and must not be presented as live.
+            "state": state,
             "age_seconds": round(age_s, 1),
-            "stale": age_s > DISCOVERY_STALE_AFTER_S,
+            "stale": stale,
             "last_failure_after_discovery": last_failure,
             "entries_allowed": False,  # Phase 0: no strategy/paper engine yet
             "entries_blocked_reason": "PHASE_0_NO_STRATEGY",
