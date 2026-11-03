@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from autotrader.common.config import Settings
@@ -22,6 +24,22 @@ class DiscoveryOutcome:
     discovery: MarketDiscovery | None
     error_code: str | None
     error_message: str | None
+    #: False when a database was configured but the result could not be stored.
+    persisted: bool = True
+
+
+def _persist(sessions: sessionmaker[Session], write: Callable[[Session], object]) -> bool:
+    """Run ``write`` in a transaction. A DB outage is logged, never raised."""
+    try:
+        with sessions.begin() as s:
+            write(s)
+    except SQLAlchemyError as exc:
+        log.error(
+            "database unavailable - discovery result not persisted",
+            extra={"error_type": type(exc).__name__},
+        )
+        return False
+    return True
 
 
 def run_discovery_once(
@@ -45,16 +63,19 @@ def run_discovery_once(
             "market discovery failed - entries blocked (fail-closed)",
             extra={"code": str(exc.code), "detail": exc.message},
         )
+        persisted = True
         if sessions is not None:
-            with sessions.begin() as s:
-                record_event(
+            persisted = _persist(
+                sessions,
+                lambda s: record_event(
                     s,
                     "MARKET_DISCOVERY_FAILED",
                     "ERROR",
                     exc.message,
                     {"code": str(exc.code), "coin": settings.market_coin},
-                )
-        return DiscoveryOutcome(False, None, str(exc.code), exc.message)
+                ),
+            )
+        return DiscoveryOutcome(False, None, str(exc.code), exc.message, persisted)
 
     log.info(
         "market discovered",
@@ -68,8 +89,10 @@ def run_discovery_once(
             "divergence_bps": str(result.oracle_mark_divergence_bps),
         },
     )
+    persisted = True
     if sessions is not None:
-        with sessions.begin() as s:
+
+        def write(s: Session) -> None:
             save_discovery(s, result)
             record_event(
                 s,
@@ -78,4 +101,6 @@ def run_discovery_once(
                 f"{result.coin} discovered with status {result.status}",
                 {"warnings": result.warnings, "raw_sha256": result.raw_sha256},
             )
-    return DiscoveryOutcome(True, result, None, None)
+
+        persisted = _persist(sessions, write)
+    return DiscoveryOutcome(True, result, None, None, persisted)

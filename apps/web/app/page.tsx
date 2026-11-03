@@ -1,3 +1,4 @@
+import AutoRefresh from "./AutoRefresh";
 import { explain } from "@/lib/i18n";
 import { getDiscovery, getHealth } from "@/lib/api";
 
@@ -45,9 +46,11 @@ function ErrorText({ code }: { code: string }) {
 
 export default async function Home() {
   const [health, discovery] = await Promise.all([getHealth(), getDiscovery()]);
+  const renderedAt = new Date().toISOString().replace("T", " ").slice(0, 19);
 
   return (
     <main className="mx-auto flex max-w-xl flex-col gap-4 px-4 py-6">
+      <AutoRefresh seconds={60} />
       <header>
         <h1 className="text-2xl font-bold">AutoTrader AI</h1>
         <p className="text-sm" style={{ color: "var(--muted)" }}>
@@ -134,6 +137,8 @@ export default async function Home() {
 
       <footer className="pb-6 text-center text-xs" style={{ color: "var(--muted)" }}>
         כל המחירים, העסקאות והרווח/הפסד במערכת זו הם סימולציה בלבד. אין חיבור לארנק ואין שליחת פקודות.
+        <br />
+        עודכן: <bdi dir="ltr">{renderedAt} UTC</bdi> · רענון אוטומטי כל 60 שניות
       </footer>
     </main>
   );

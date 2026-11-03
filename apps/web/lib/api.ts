@@ -43,13 +43,14 @@ export type Result<T> = { ok: true; data: T } | { ok: false; error: string };
 
 const BASE = process.env.API_BASE_URL ?? "http://localhost:8000";
 
-async function getJson<T>(path: string): Promise<Result<T>> {
+async function getJson<T>(path: string, okStatuses: number[] = []): Promise<Result<T>> {
   try {
     const res = await fetch(`${BASE}${path}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(5000),
+      redirect: "error",
     });
-    if (!res.ok) {
+    if (!res.ok && !okStatuses.includes(res.status)) {
       let detail = `HTTP ${res.status}`;
       try {
         const body = (await res.json()) as { detail?: string };
@@ -65,5 +66,6 @@ async function getJson<T>(path: string): Promise<Result<T>> {
   }
 }
 
-export const getHealth = () => getJson<Health>("/health");
+// /health answers 503 with a full body when degraded; that body is still the real state.
+export const getHealth = () => getJson<Health>("/health", [503]);
 export const getDiscovery = () => getJson<DiscoveryResponse>("/api/market/discovery");

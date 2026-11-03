@@ -29,7 +29,7 @@ def _discover(args: argparse.Namespace) -> int:
         outcome = run_discovery_once(settings, client, sessions)
     if outcome.ok and outcome.discovery is not None:
         print(json.dumps(outcome.discovery.model_dump(mode="json"), indent=2, ensure_ascii=False))
-        return 0
+        return 0 if outcome.persisted else 3
     print(
         json.dumps({"ok": False, "code": outcome.error_code, "message": outcome.error_message}),
         file=sys.stderr,

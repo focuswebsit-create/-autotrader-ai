@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -51,7 +51,7 @@ def create_app(
     )
 
     @app.get("/health")
-    def health() -> dict[str, Any]:
+    def health(response: Response) -> dict[str, Any]:
         db_status = "not_configured"
         if sessions is not None:
             try:
@@ -60,8 +60,12 @@ def create_app(
                 db_status = "ok"
             except SQLAlchemyError:
                 db_status = "unavailable"
+        degraded = db_status == "unavailable"
+        if degraded:
+            # Non-2xx so container/uptime health checks notice the outage.
+            response.status_code = 503
         return {
-            "status": "ok" if db_status != "unavailable" else "degraded",
+            "status": "degraded" if degraded else "ok",
             "trading_mode": mode,
             "paper_only": True,
             "database": db_status,
