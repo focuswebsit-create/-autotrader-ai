@@ -1,5 +1,10 @@
 # Local development stack. PAPER-ONLY: no service receives wallet keys.
 # Usage: cp .env.example .env && docker compose up --build
+#
+# Database users (least privilege, created on first DB start by infra/db/init-roles.sh):
+#   migrate   -> owner (schema changes only)
+#   api       -> autotrader_api    (SELECT only)
+#   collector -> autotrader_worker (INSERT/UPDATE on market-data tables; no DELETE/DDL)
 services:
   db:
     image: postgres:16
@@ -7,8 +12,13 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-autotrader}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local-only}
       POSTGRES_DB: ${POSTGRES_DB:-autotrader}
+      AUTOTRADER_API_DB_PASSWORD: ${AUTOTRADER_API_DB_PASSWORD:-api-local-only}
+      AUTOTRADER_WORKER_DB_PASSWORD: ${AUTOTRADER_WORKER_DB_PASSWORD:-worker-local-only}
     ports: ["127.0.0.1:5432:5432"]
-    volumes: [pgdata:/var/lib/postgresql/data]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/db/init-roles.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+      - ./infra/db/roles.sql:/docker-entrypoint-initdb.d/roles.sql.in:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
@@ -27,7 +37,9 @@ services:
 
   api:
     build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
-    environment: *backend_env
+    environment:
+      <<: *backend_env
+      AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader_api:${AUTOTRADER_API_DB_PASSWORD:-api-local-only}@db:5432/${POSTGRES_DB:-autotrader}
     ports: ["127.0.0.1:8000:8000"]
     restart: unless-stopped
     healthcheck:
@@ -38,11 +50,15 @@ services:
       retries: 5
     depends_on: { migrate: { condition: service_completed_successfully } }
 
-  worker:
+  collector:
     build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
-    environment: *backend_env
-    command: ["python", "-m", "autotrader.worker", "--interval", "300"]
+    environment:
+      <<: *backend_env
+      AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader_worker:${AUTOTRADER_WORKER_DB_PASSWORD:-worker-local-only}@db:5432/${POSTGRES_DB:-autotrader}
+    # Market discovery, REST backfill, live WS stream, gap fill, heartbeat.
+    command: ["autotrader", "collect"]
     restart: unless-stopped
+    stop_grace_period: 20s
     depends_on: { migrate: { condition: service_completed_successfully } }
 
   web:

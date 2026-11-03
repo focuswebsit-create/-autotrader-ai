@@ -1,4 +1,7 @@
 import AutoRefresh from "./AutoRefresh";
+import CandleChart from "./components/CandleChart";
+import DataQuality from "./components/DataQuality";
+import StatusPanel from "./components/StatusPanel";
 import { explain } from "@/lib/i18n";
 import { getDiscovery, getHealth, getMode, type DiscoveryState } from "@/lib/api";
 
@@ -7,10 +10,7 @@ export const dynamic = "force-dynamic";
 
 function Card({ title, children }: { title: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section
-      className="rounded-2xl border p-4 shadow-sm"
-      style={{ background: "var(--card)", borderColor: "var(--border)" }}
-    >
+    <section className="card">
       <h2 className="mb-3 text-base font-semibold">{title}</h2>
       {children}
     </section>
@@ -126,53 +126,59 @@ export default async function Home() {
   const renderedAt = new Date().toISOString().replace("T", " ").slice(0, 19);
 
   return (
-    <main className="mx-auto flex max-w-xl flex-col gap-4 px-4 py-6">
+    <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
       <AutoRefresh seconds={60} />
       <header>
         <h1 className="text-2xl font-bold">AutoTrader AI</h1>
         <p className="text-sm" style={{ color: "var(--muted)" }}>
-          שלב 0 · איתור שוק ובדיקות בטיחות · נתונים ציבוריים מ־Hyperliquid (קריאה בלבד)
+          שלב 1 · מנוע נתוני שוק · נתונים ציבוריים מ־Hyperliquid Mainnet (קריאה בלבד). אין עדיין אסטרטגיה ואין
+          ביצוע עסקאות, גם לא וירטואליות.
         </p>
       </header>
 
-      <Card title="מצב מערכת">
-        {health.ok ? (
-          <dl>
-            <Row label="מצב מסחר" value={<Badge tone="ok">{health.data.trading_mode}</Badge>} />
-            <Row label="מסחר אמיתי" value="לא קיים במערכת" />
-            <Row
-              label="מסד נתונים"
-              value={
-                health.data.database === "ok" ? (
-                  <Badge tone="ok">תקין</Badge>
-                ) : health.data.database === "not_configured" ? (
-                  <Badge tone="warn">לא הוגדר</Badge>
-                ) : (
-                  <Badge tone="bad">לא זמין</Badge>
-                )
-              }
-            />
-            <Row label="גרסה" value={health.data.version} ltr />
-          </dl>
-        ) : (
-          <ErrorText code={health.error} />
-        )}
-      </Card>
+      <StatusPanel />
+      <CandleChart />
+      <DataQuality />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card title="מצב מערכת">
+          {health.ok ? (
+            <dl>
+              <Row label="מצב מסחר" value={<Badge tone="ok">{health.data.trading_mode}</Badge>} />
+              <Row label="מסחר אמיתי" value="לא קיים במערכת" />
+              <Row
+                label="מסד נתונים"
+                value={
+                  health.data.database === "ok" ? (
+                    <Badge tone="ok">תקין</Badge>
+                  ) : health.data.database === "not_configured" ? (
+                    <Badge tone="warn">לא הוגדר</Badge>
+                  ) : (
+                    <Badge tone="bad">לא זמין</Badge>
+                  )
+                }
+              />
+              <Row label="גרסה" value={health.data.version} ltr />
+            </dl>
+          ) : (
+            <ErrorText code={health.error} />
+          )}
+        </Card>
 
-      <Card
-        title={
-          <>
-            שוק <bdi dir="ltr">{coin ?? "—"}</bdi> · נפט <bdi dir="ltr">WTI</bdi> ·{" "}
-            <bdi dir="ltr">HIP-3</bdi>
-          </>
-        }
-      >
-        {discovery.ok ? (
-          <MarketDetails data={discovery.data} />
-        ) : (
-          <ErrorText code={discovery.error} />
-        )}
-      </Card>
+        <Card
+          title={
+            <>
+              שוק <bdi dir="ltr">{coin ?? "—"}</bdi> · נפט <bdi dir="ltr">WTI</bdi> ·{" "}
+              <bdi dir="ltr">HIP-3</bdi>
+            </>
+          }
+        >
+          {discovery.ok ? (
+            <MarketDetails data={discovery.data} />
+          ) : (
+            <ErrorText code={discovery.error} />
+          )}
+        </Card>
+      </div>
 
       <footer className="pb-6 text-center text-xs" style={{ color: "var(--muted)" }}>
         כל המחירים, העסקאות והרווח/הפסד במערכת זו הם סימולציה בלבד. אין חיבור לארנק ואין שליחת פקודות.

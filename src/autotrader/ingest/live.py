@@ -273,7 +273,7 @@ class LiveCollector:
         self.state.ws_state = "DISCONNECTED"
         await asyncio.to_thread(self.write_heartbeat)
         # Initial history: request everything the API has, per interval.
-        await asyncio.to_thread(self.sync_rest, force=True, kind="backfill")
+        await asyncio.to_thread(self.sync_rest, force=True, kind="gap_fill")
         background = [
             asyncio.create_task(self._heartbeat_loop(stop)),
             asyncio.create_task(self._sync_loop(stop)),

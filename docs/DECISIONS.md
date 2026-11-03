@@ -66,3 +66,46 @@ Any unexpected exception during discovery, or the DB rejecting the data (`DB_REJ
 
 ## ADR-013 — Destructive DB tests require an explicit `*_test` database (QA 2026-11-03)
 `tests/integration/test_postgres.py` drops all tables. It only runs with `AUTOTRADER_TEST_DATABASE_URL` pointing to a database whose name ends in `_test`. Non-live tests are also blocked from opening any non-localhost socket (`tests/conftest.py`).
+
+---
+# Phase 1 — Market Data Engine
+
+## ADR-014 — REST is the source of truth for closed bars; WS only updates forming bars (2026-11-03)
+**Context.** The WS stream can drop, duplicate or reorder frames, and doesn't say "this bar is final".
+**Decision.**
+- Only REST (`candleSnapshot`) marks a bar `is_closed`, and only once `now ≥ close_time + 5 s` on our clock.
+- WS updates touch forming bars only. An update with lower volume or trade count than what is stored is out-of-order and ignored.
+- The collector re-syncs from REST after every (re)connect and every 30 s (finalize), starting at the last closed bar. This closes bars and fills anything the stream missed.
+**Consequences.** Closed history never depends on WS delivery. Strategy inputs (closed bars) can lag the true close by up to ~35 s.
+
+## ADR-015 — Closed bars are immutable; problems are recorded, never fixed (2026-11-03)
+- One row per (coin, interval, open_time), enforced by a unique key. All writes are idempotent upserts.
+- A later REST value that differs from a stored closed bar is **not** applied. It is recorded as `REVISED_CLOSED_CANDLE`, which keeps backtests reproducible.
+- Invalid bars are rejected and recorded as `REJECTED_CANDLE` with the raw payload: non-positive or out-of-range prices, OHLC inconsistency, negative volume, misaligned time, wrong market, floats, NaN.
+- Conflicting duplicates are recorded as `DUPLICATE_CONFLICT`.
+- Missing bars are recorded as `GAP` (with the count) and **never synthesized**. A gap is marked resolved only if real data later arrives; the row is kept for audit.
+- Outliers are **flagged, not removed**: a close-to-close move above 8% (30m) or 10% (1h), or a high–low range above 10% / 12%. These thresholds sit above the largest moves in the available history (3.7% / 6.0%).
+
+## ADR-016 — No look-ahead by construction (2026-11-03)
+Strategy and backtest code must read bars only through `closed_candles(coin, interval, as_of=T)`. It returns only bars with `is_closed AND close_time ≤ T`, so a bar ending after T is invisible. The API applies the same rule with its own clock, and returns the forming bar separately as `forming` (display only).
+
+## ADR-017 — History depth is what the API provides (2026-11-03)
+`candleSnapshot` is called with `startTime=0` and the real range is recorded per run (`ingestion_runs`). Observed on 2026-11-03:
+- 30m: 5,000–5,008 bars from 2026-07-22 (~104 days);
+- 1h: 5,000–5,004 bars from 2026-04-09 (~208 days).
+
+The database keeps all bars it has ever collected, so coverage grows over time while the collector runs. Longer history requires a separately licensed and verified source (blueprint §3).
+
+## ADR-018 — WebSocket guard and single writer (2026-11-03)
+- `common/ws.py` is the only WebSocket client, mirroring the HTTP allow-list. It connects only to the exact `wss://api.hyperliquid.xyz/ws`.
+- Outgoing frames are limited to `subscribe` / `unsubscribe` / `ping` for the public channels `candle`, `activeAssetCtx`, `l2Book` and `trades`.
+- Hyperliquid's WS `post` method (which can carry signed actions) and every user/account channel are refused before sending.
+- A `SafetyViolationError` stops the collector instead of triggering a reconnect.
+- A PostgreSQL advisory lock allows exactly one collector to write. A second instance exits with code 5 (verified live).
+
+## ADR-019 — Least-privilege database users (2026-11-03; resolves ADR-010 follow-up)
+- Migration 0003 creates the group roles `autotrader_reader` (SELECT) and `autotrader_writer`.
+- `autotrader_writer` gets SELECT everywhere, but INSERT/UPDATE only on the market-data and event tables. It has no DELETE, TRUNCATE or DDL, and no write access to `system_config` or `audit_log`.
+- The login users `autotrader_api` and `autotrader_worker` come from `infra/db/roles.sql` (run automatically by the compose DB on first start).
+- Only migrations use the owner account.
+- A test asserts every table is granted to both roles, so future tables can't be forgotten.
