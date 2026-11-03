@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: autotrader
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: autotrader_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U autotrader" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader:ci-only@localhost:5432/autotrader_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check src tests && uv run ruff format --check src tests
+      - name: Typecheck
+        run: uv run mypy
+      - name: Safety check
+        run: uv run autotrader safety-check
+      - name: Migrations (upgrade / downgrade / upgrade)
+        run: uv run alembic upgrade head && uv run alembic downgrade base && uv run alembic upgrade head
+      - name: Tests (unit + PostgreSQL; live tests are opt-in)
+        run: uv run pytest --cov=autotrader --cov-report=term-missing
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
