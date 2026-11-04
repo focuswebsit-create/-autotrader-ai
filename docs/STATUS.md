@@ -1,6 +1,6 @@
 # Status
 
-**Current phase:** Phase 2 — Backtesting & Strategy Engine (complete, PR awaiting review) · **Mode:** PAPER ONLY · **Updated:** 2026-11-04
+**Current phase:** Phase 2.5 — Forward Testing & Strategy Validation (built, PR awaiting review; forward observation must run on persistent infrastructure) · **Mode:** PAPER ONLY · **Updated:** 2026-11-04
 
 Phase 1 details and evidence: `docs/PHASE1_REPORT.md`.
 
@@ -53,5 +53,17 @@ Full review and fixes: see `docs/QA_REVIEW_PHASE0.md`. Locally: 178 tests passed
 | Hebrew Backtest Lab (chart with entries/exits, equity, KPIs, trades) | ✅ `/backtest` |
 
 Results after the pre-merge research audit (2026-11-04, 104 days of 30m data, observed fee 0.009%): EMA 20/50+RSI **FAIL**, Trend Following **INCONCLUSIVE**, Breakout+Volume **INCONCLUSIVE** (break-even). No strategy shows an edge after costs. The holdout of this dataset is EXPOSED: no untouched independent test exists until forward data after 2026-11-04 08:00 UTC accumulates (ADR-029).
+
+## Phase 2.5 — Forward Testing & Strategy Validation ✅ built (see PHASE2_5_REPORT.md)
+| Item | State |
+|---|---|
+| Strategies + params + costs + risk + code hash frozen before the test | ✅ immutable `forward_tests` |
+| Real-time per-bar decision journal (timestamp, market data, version, reason) | ✅ append-only `forward_decisions` |
+| No retroactive changes (DB triggers, results recomputed, code-change halt) | ✅ tested on PostgreSQL |
+| Virtual P&L with fees/spread/slippage/funding (same engine as backtest) | ✅ |
+| Backtest vs forward comparison (parity + consistency) | ✅ |
+| INCONCLUSIVE until 30 trades / 30 days / 15 trade days | ✅ |
+| Dashboard `/forward` | ✅ |
+| 30+ days of forward observation | ⏳ needs the `forward` service running continuously (Docker Compose) |
 
 ## Next: Phase 3 — Autonomous forward paper engine (NOT started; awaiting owner approval)
