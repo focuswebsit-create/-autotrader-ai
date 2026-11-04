@@ -1,6 +1,6 @@
 # Phase 1 Report — Market Data Engine (xyz:CL, PAPER-ONLY)
 
-**Date:** 2026-11-03 · **Branch:** `claude/phase1-market-data` · **PR:** #2 (stacked on PR #1 / Phase 0)
+**Date:** 2026-11-03 (updated 2026-11-04 after an unplanned overnight outage, §4.2) · **Branch:** `claude/phase1-market-data` · **PR:** #2 (stacked on PR #1 / Phase 0)
 **Scope:** historical + live market data from Hyperliquid **mainnet** (read-only). No strategy, no execution engine, no orders of any kind.
 
 > **סיכום בעברית:** מנוע הנתונים אוסף נרות של 30 דקות ושל שעה עבור `xyz:CL` מ־Hyperliquid Mainnet, בקריאה בלבד.
@@ -80,14 +80,31 @@ Script: every stored closed bar was compared field by field (O/H/L/C/V/trades, e
 - A direct REST comparison of the last 30 bars per interval gave 0 differences and 0 missing.
 - 0 duplicates, 0 early closes.
 
-**Not exercised live:** a bar closing *during* the outage, since no bar boundary fell inside the 60-second window. That path is covered by the automated tests below (REST sync from the last closed bar after reconnect, in chunks).
+**Not exercised in this 60-second test:** a bar closing *during* the outage. It was later exercised live by the unplanned ~14.5-hour outage (§4.2).
 
-### 4.2 Other live operational checks
+### 4.2 Unplanned ~14.5-hour outage (container reset, 2026-11-03 16:20 → 2026-11-04 06:54 UTC)
+The development container was reset overnight. The main collector was killed **without** a graceful shutdown, so its last heartbeat row still said `RUNNING/CONNECTED`. This tested exactly the case §4.1 could not cover: many bars closed while the collector was down.
+
+**Before the restart** (API, read-only user):
+- `service_state = DOWN` (no heartbeat for 52,430 s); `COLLECTOR_DOWN` (ERROR).
+- `DATA_STALE` for 30m and 1h; `fresh = false`.
+- The stale `RUNNING` row was **not** trusted.
+
+**After the restart** (06:54:39 UTC):
+- Startup gap fill via REST: run #19 (30m) received 31, inserted **29**, finalized 1 forming bar; run #20 (1h) received 16, inserted **14**, finalized 1.
+- Within 20 s: `RUNNING`, 0 alerts, `fresh = true`, 0 missing bars, 0 gaps.
+
+**Checked against mainnet REST** (last 40 closed bars per interval):
+- 30m: 40/40 identical (28 of them gap-filled after the restart), 0 missing, 0 left unclosed.
+- 1h: 40/40 identical (13 of them gap-filled after the restart), 0 missing, 0 left unclosed.
+- 0 duplicates, 0 bars closed early, 0 open data-quality issues.
+
+### 4.3 Other live operational checks
 - **Graceful restart** of the main collector, done twice: heartbeat `STOPPED`, then a restart with no duplicates (counts identical before and after).
 - **Single writer:** a second `autotrader collect` against the same DB exited with **code 5** ("another collector is running").
 - **REST rate limit:** heavy verification requests from this environment got HTTP 429. `InfoClient` retries 429 with backoff/`Retry-After`. The collector's own small requests were never rate-limited.
 
-### 4.3 Automated tests (deterministic, run in CI)
+### 4.4 Automated tests (deterministic, run in CI)
 `tests/unit/test_live_collector.py` (fake WS behind the real guard, recorded mainnet data):
 - subscribe and ingest
 - disconnect → reconnect → REST gap fill with no duplicates
@@ -158,7 +175,7 @@ Local, Python 3.12 + PostgreSQL 16, with `RUN_LIVE_TESTS=1`:
 1. **History depth** is limited by the API (~5,000 bars per interval: 30m ≈ 104 days, 1h ≈ 208 days). That's enough for development and validation, but **thin for a statistically strong backtest**, especially at 1h. Phase 2 must report sample sizes and label results INCONCLUSIVE when appropriate. Coverage grows as long as the collector keeps running.
 2. **Closed-bar latency:** a bar becomes "closed" in the DB about 5–35 s after the period ends (grace + 30 s finalize cycle).
 3. **The reconnect delay** after a long outage can reach the backoff cap (observed 38 s, max 60 s).
-4. **No bar boundary fell inside the live outage window.** That path is covered by automated tests only.
+4. **(Resolved)** Bars closing during an outage: verified live by the ~14.5-hour outage on 2026-11-04 (§4.2). Note that while the collector is down **no new data is collected**: the gap is filled on restart only because the API still serves those bars. Outages longer than the API window (~104 days at 30m) would lose data permanently, so production needs a restart policy and alerting.
 5. **External WTI session calendar** (blueprint §2.5) is not implemented yet. It is needed before any paper entries (Phase 3). Phase 1 only collects data.
 6. **No authentication** on the web or API yet (read-only, localhost-bound). Required before any online exposure (Phase 4).
 7. **The advisory lock** prevents two collectors per database. Running collectors against *different* databases is allowed by design (the isolated chaos test relied on this).
