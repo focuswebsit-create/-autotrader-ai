@@ -118,9 +118,18 @@ class LiveCollector:
         self.rng = rng or random.Random()  # noqa: S311 - jitter, not crypto
         self.state = CollectorState()
         self._conn: WsConnection | None = None
-        # REST sync and WS handling run in worker threads; serialise all candle
-        # writes so two writers never race on the same (coin, interval, open_time).
+        # REST sync and WS handling run in worker threads.
+        # * _write_lock: held ONLY around candle DB writes (never network I/O), so
+        #   two writers never race on the same (coin, interval, open_time) and a
+        #   slow REST call can't stall frame handling (review finding M2).
+        # * _sync_lock: serialises whole REST syncs (no overlapping syncs).
         self._write_lock = threading.Lock()
+        self._sync_lock = threading.Lock()
+        #: Set on shutdown: no new writes start after it (review finding M4).
+        self._closed = False
+        self._session_connected = False
+        self._inflight: set[asyncio.Task[bool]] = set()
+        self._stop: asyncio.Event | None = None
         #: Set when a background task hit a safety violation; run() re-raises it.
         self._fatal: SafetyViolationError | None = None
 
@@ -168,8 +177,42 @@ class LiveCollector:
 
     def sync_rest(self, *, force: bool, kind: str = "gap_fill") -> bool:
         """Finalize closed bars and fill gaps from REST. Returns overall success."""
-        with self._write_lock:
+        if self._closed:
+            return False
+        with self._sync_lock:
+            if self._closed:
+                return False
             return self._sync_rest_locked(force=force, kind=kind)
+
+    def _drain(self) -> None:
+        """Block until no sync or candle write is in progress; refuse new ones.
+
+        Called on shutdown before the heartbeat says STOPPED and before the
+        caller releases the single-writer lock.
+        """
+        self._closed = True
+        with self._sync_lock, self._write_lock:
+            pass
+
+    def _spawn_sync(self, *, force: bool, kind: str) -> asyncio.Task[bool]:
+        task = asyncio.create_task(asyncio.to_thread(self.sync_rest, force=force, kind=kind))
+        self._inflight.add(task)
+        task.add_done_callback(self._sync_done)
+        return task
+
+    def _sync_done(self, task: asyncio.Task[bool]) -> None:
+        self._inflight.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if isinstance(exc, SafetyViolationError):
+            # Never swallow a safety violation from a background sync: stop.
+            self._fatal = exc
+            if self._stop is not None:
+                self._stop.set()
+        elif exc is not None:
+            self._set_error(f"sync: {type(exc).__name__}")
+            log.error("background sync failed", extra={"error": type(exc).__name__})
 
     def _sync_rest_locked(self, *, force: bool, kind: str) -> bool:
         ok = True
@@ -186,6 +229,7 @@ class LiveCollector:
                     last_closed_open_time=last,
                     kind=kind,
                     clock=self.clock,
+                    write_lock=self._write_lock,
                 )
                 ok = ok and all(r.ok for r in results)
                 if results and not results[-1].ok:
@@ -236,7 +280,13 @@ class LiveCollector:
         if interval not in self.cfg.intervals:
             return
         parsed = parse_candle(item, coin=self.cfg.coin, interval=interval)
-        with self._write_lock, self.sessions.begin() as s:
+        with self._write_lock:
+            if self._closed:
+                return
+            self._write_candle(parsed, interval, now)
+
+    def _write_candle(self, parsed: Candle | Rejected, interval: Interval, now: datetime) -> None:
+        with self.sessions.begin() as s:
             if isinstance(parsed, Rejected):
                 self.state.rejected += 1
                 record_rejections(s, self.cfg.coin, interval, [parsed], now)
@@ -292,6 +342,7 @@ class LiveCollector:
     # ------------------------------------------------------------------ main loop
 
     async def run(self, stop: asyncio.Event) -> None:
+        self._stop = stop
         self.state.started_at = self.clock()
         self.state.ws_state = "DISCONNECTED"
         await asyncio.to_thread(self.write_heartbeat)
@@ -304,9 +355,9 @@ class LiveCollector:
         attempt = 0
         try:
             while not stop.is_set():
+                self._session_connected = False
                 try:
                     await self._session(stop)
-                    attempt = 0
                 except (asyncio.CancelledError, SafetyViolationError):
                     # A safety violation is a bug, never a transient error: stop.
                     raise
@@ -316,7 +367,11 @@ class LiveCollector:
                     log.warning("ws session ended", extra={"error": self.state.last_error})
                 if stop.is_set():
                     break
+                if self._session_connected:
+                    # The last session worked: start backoff from scratch (finding M1).
+                    attempt = 0
                 attempt += 1
+                self.state.consecutive_failures = attempt
                 self.state.reconnects += 1
                 self.state.ws_state = "DISCONNECTED"
                 delay = self.backoff_delay(attempt)
@@ -327,6 +382,10 @@ class LiveCollector:
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)
+            # Cancelling a task does not stop its worker thread: wait until no
+            # sync/write is running and refuse new ones, THEN report STOPPED.
+            await asyncio.to_thread(self._drain)
+            await asyncio.gather(*list(self._inflight), return_exceptions=True)
             await asyncio.to_thread(self.write_heartbeat, stopping=True)
         if self._fatal is not None:
             raise self._fatal
@@ -340,10 +399,12 @@ class LiveCollector:
                 await conn.send(json.dumps({"method": "subscribe", "subscription": sub}))
             self.state.ws_state = "CONNECTED"
             self.state.last_ws_message_at = self.clock()
+            self._session_connected = True
             self._recovered()
             log.info("ws connected", extra={"subscriptions": len(self.subscriptions())})
             # Fill anything missed while disconnected (REST is the source of truth).
-            await asyncio.to_thread(self.sync_rest, force=True)
+            # Runs in the background so frames keep being read meanwhile (M2).
+            self._spawn_sync(force=True, kind="gap_fill")
             last_ping = self.clock()
             while not stop.is_set():
                 now = self.clock()

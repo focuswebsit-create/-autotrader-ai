@@ -18,7 +18,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from typing import Final, Literal
+from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
 TradingMode = Literal["PAPER"]
@@ -101,6 +101,19 @@ class SafetyViolationError(RuntimeError):
     """Raised whenever an action would break the PAPER-ONLY guarantees."""
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        # A server may read the FIRST of duplicate keys while json.loads keeps the
+        # last: e.g. {"method":"post","method":"subscribe"} (review finding L8).
+        raise SafetyViolationError("Duplicate JSON keys are not allowed")
+    return dict(pairs)
+
+
+def _strict_json(data: str | bytes) -> Any:
+    return json.loads(data, object_pairs_hook=_no_duplicate_keys)
+
+
 def check_request_allowed(method: str, url: str, body: bytes | None) -> None:
     """Validate an outgoing HTTP request. Raises ``SafetyViolationError`` if not allowed.
 
@@ -127,7 +140,7 @@ def check_request_allowed(method: str, url: str, body: bytes | None) -> None:
     if not body:
         raise SafetyViolationError("Info request must have a JSON body")
     try:
-        payload = json.loads(body)
+        payload = _strict_json(body)
     except (ValueError, UnicodeDecodeError) as exc:
         raise SafetyViolationError("Info request body is not valid JSON") from exc
     if not isinstance(payload, dict):
@@ -172,7 +185,7 @@ def check_ws_url(url: str) -> None:
 def check_ws_message(message: str | bytes) -> None:
     """Validate an OUTGOING WS frame: subscribe/unsubscribe/ping to public data only."""
     try:
-        payload = json.loads(message)
+        payload = _strict_json(message)
     except (ValueError, UnicodeDecodeError) as exc:
         raise SafetyViolationError("WS message is not valid JSON") from exc
     if not isinstance(payload, dict):

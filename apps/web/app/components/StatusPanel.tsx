@@ -40,6 +40,10 @@ export default function StatusPanel() {
   const ws = service === "RUNNING" || service === "DEGRADED" ? hb?.ws_state ?? "DISCONNECTED" : "DISCONNECTED";
   const ctx = hb?.market_ctx ?? {};
   const ctxAge = ageFrom(ctx.received_at, now);
+  // "Live" only while the collector is up, connected and the price is recent;
+  // otherwise it is the last known value (review finding M3).
+  const liveCtx = !frozen && ws === "CONNECTED" && ctxAge != null && ctxAge < 60;
+  const pxLabel = liveCtx ? "(חי)" : "(אחרון ידוע)";
 
   return (
     <section className="card" aria-labelledby="status-title">
@@ -58,8 +62,8 @@ export default function StatusPanel() {
       {data && (
         <div style={frozen ? { opacity: 0.5 } : undefined}>
           <dl className="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-2 lg:grid-cols-3">
-            <Stat label="מחיר Mark (חי)" value={ctx.markPx ? fmtNum(ctx.markPx) : "—"} ltr />
-            <Stat label="מחיר Oracle (חי)" value={ctx.oraclePx ? fmtNum(ctx.oraclePx) : "—"} ltr />
+            <Stat label={`מחיר Mark ${pxLabel}`} value={ctx.markPx ? fmtNum(ctx.markPx) : "—"} ltr dim={!liveCtx} />
+            <Stat label={`מחיר Oracle ${pxLabel}`} value={ctx.oraclePx ? fmtNum(ctx.oraclePx) : "—"} ltr dim={!liveCtx} />
             <Stat label="עדכון מחיר אחרון" value={ctxAge != null ? `לפני ${fmtAge(ctxAge)}` : "—"} />
             <Stat label="הודעה חיה אחרונה" value={hb?.last_ws_message_at ? `לפני ${fmtAge(ageFrom(hb.last_ws_message_at, now))}` : "—"} />
             <Stat label="דיווח שירות אחרון" value={hb?.last_heartbeat_at ? `לפני ${fmtAge(ageFrom(hb.last_heartbeat_at, now))}` : "—"} />
@@ -115,9 +119,9 @@ export default function StatusPanel() {
   );
 }
 
-function Stat({ label, value, ltr }: { label: string; value: React.ReactNode; ltr?: boolean }) {
+function Stat({ label, value, ltr, dim }: { label: string; value: React.ReactNode; ltr?: boolean; dim?: boolean }) {
   return (
-    <div className="flex items-baseline justify-between gap-2 py-0.5">
+    <div className="flex items-baseline justify-between gap-2 py-0.5" style={dim ? { opacity: 0.5 } : undefined}>
       <dt className="muted">{label}</dt>
       <dd className="font-medium tabular-nums" dir={ltr ? "ltr" : undefined}>{value}</dd>
     </div>

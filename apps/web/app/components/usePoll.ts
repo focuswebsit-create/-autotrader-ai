@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getBackend } from "@/lib/client";
 import type { Result } from "@/lib/types";
@@ -13,8 +13,12 @@ export function usePoll<T>(path: string, everyMs: number, params?: Record<string
     error: null,
     at: null,
   });
+  // Responses can arrive out of order; only the latest request may update state.
+  const seq = useRef(0);
   const run = useCallback(async () => {
+    const mine = ++seq.current;
     const res: Result<T> = await getBackend<T>(path, key ? JSON.parse(key) : undefined);
+    if (mine !== seq.current) return;
     setState((prev) =>
       res.ok ? { data: res.data, error: null, at: Date.now() } : { ...prev, error: res.error },
     );

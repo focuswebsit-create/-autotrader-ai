@@ -18,6 +18,11 @@ from autotrader.common.safety import (
     assert_paper_mode,
     check_environment,
 )
+from autotrader.db.market_data import (
+    open_lock_connection,
+    release_collector_lock,
+    try_collector_lock,
+)
 from autotrader.db.session import session_factory
 from autotrader.ingest.rest import backfill
 from autotrader.market.candles import Interval
@@ -75,6 +80,31 @@ def _backfill(args: argparse.Namespace) -> int:
     if env is None:
         return 3
     settings, sessions = env
+    assert settings.database_url is not None
+    # Same single-writer lock as the collector (review finding M4): never write
+    # candles concurrently with a running collector (which already backfills).
+    lock_conn = open_lock_connection(settings.database_url)
+    try:
+        if not try_collector_lock(lock_conn):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "code": "COLLECTOR_RUNNING",
+                        "message": "a collector holds the writer lock; it already backfills",
+                    }
+                ),
+                file=sys.stderr,
+            )
+            return 5
+        return _backfill_locked(settings, sessions, args)
+    finally:
+        release_collector_lock(lock_conn)
+
+
+def _backfill_locked(
+    settings: Settings, sessions: sessionmaker[Session], args: argparse.Namespace
+) -> int:
     intervals = [Interval(args.interval)] if args.interval else list(Interval)
     out = []
     ok = True

@@ -121,7 +121,12 @@ def parse_candle(raw: Any, *, coin: str, interval: Interval) -> Candle | Rejecte
         o, h, low, c = (_dec(raw[k], k) for k in ("o", "h", "l", "c"))
         v = _dec(raw["v"], "v")
         n_raw = raw.get("n")
-        trades = None if n_raw is None else int(n_raw)
+        if n_raw is not None and (
+            isinstance(n_raw, bool) or not isinstance(n_raw, int) or not 0 <= n_raw <= 2**31 - 1
+        ):
+            # Strict like prices: no floats/bools/negatives, must fit the INTEGER column.
+            raise ValueError(f"n must be a non-negative integer: {n_raw!r}")
+        trades = n_raw
         symbol, iv = raw.get("s"), raw.get("i")
     except (KeyError, ValueError, TypeError, OverflowError) as exc:
         return Rejected(CandleRejection.MALFORMED, str(exc), raw)

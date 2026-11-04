@@ -215,7 +215,10 @@ CANDLE_SQL = (
 def test_worker_role_least_privilege(roles: dict[str, Any]) -> None:
     w = roles["worker"]
     with w.begin() as c:  # allowed: what the collector actually does
-        c.execute(text(CANDLE_SQL.format(o=90, h=91, l=89, c=90.5)))
+        # A FORMING bar (is_closed=false) may be updated by the collector.
+        c.execute(
+            text(CANDLE_SQL.format(o=90, h=91, l=89, c=90.5).replace("true,'rest'", "false,'ws'"))
+        )
         c.execute(text("UPDATE candles SET volume = 2"))
         c.execute(
             text(
@@ -376,3 +379,60 @@ def test_lock_loss_is_detected(migrated: str) -> None:
         assert lock_still_held(conn) is False
     finally:
         release_collector_lock(conn)  # must not raise on a dead connection
+
+
+def test_closed_candle_is_immutable_in_db(roles: dict[str, Any]) -> None:
+    """Final review L1: immutability of closed bars is enforced by the DB (migration 0004)."""
+    w = roles["worker"]
+    with w.begin() as c:
+        c.execute(text(CANDLE_SQL.format(o=90, h=91, l=89, c=90.5)))  # closed bar
+    with pytest.raises(DBAPIError, match="immutable"), w.begin() as c:
+        c.execute(text("UPDATE candles SET close = 90.9 WHERE is_closed"))
+    with pytest.raises(DBAPIError, match="immutable"), w.begin() as c:
+        c.execute(text("UPDATE candles SET is_closed = false"))
+    # A forming bar can still be updated and then closed exactly once.
+    with w.begin() as c:
+        c.execute(
+            text(
+                CANDLE_SQL.format(o=90, h=91, l=89, c=90.5)
+                .replace("true,'rest'", "false,'ws'")
+                .replace(
+                    "'2026-01-01T00:00:00Z','2026-01-01T00:30:00Z'",
+                    "'2026-01-01T00:30:00Z','2026-01-01T01:00:00Z'",
+                )
+            )
+        )
+        c.execute(text("UPDATE candles SET volume = 5 WHERE NOT is_closed"))
+        c.execute(text("UPDATE candles SET is_closed = true, source = 'rest' WHERE NOT is_closed"))
+    with pytest.raises(DBAPIError, match="immutable"), w.begin() as c:
+        c.execute(text("UPDATE candles SET volume = 6"))
+
+
+def test_cli_backfill_refuses_while_collector_holds_lock(
+    migrated: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Final review M4: the CLI backfill respects the single-writer lock."""
+    from autotrader import cli
+    from autotrader.common.config import get_settings
+    from autotrader.db.market_data import (
+        open_lock_connection,
+        release_collector_lock,
+        try_collector_lock,
+    )
+
+    holder = open_lock_connection(migrated)
+    try:
+        assert try_collector_lock(holder)
+        monkeypatch.setenv("AUTOTRADER_DATABASE_URL", migrated)
+        get_settings.cache_clear()
+
+        class NoNetwork:
+            def __init__(self, *a: Any, **k: Any) -> None:
+                raise AssertionError("backfill must not fetch while the lock is held")
+
+        monkeypatch.setattr(cli, "InfoClient", NoNetwork)
+        assert cli.main(["backfill"]) == 5
+        assert "COLLECTOR_RUNNING" in capsys.readouterr().err
+    finally:
+        release_collector_lock(holder)
+        get_settings.cache_clear()

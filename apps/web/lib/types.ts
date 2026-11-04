@@ -24,6 +24,9 @@ export type CandlesResponse = {
   truncated: boolean;
   candles: CandleDto[];
   forming: CandleDto | null;
+  stale_forming_open_time: string | null;
+  fresh: boolean;
+  last_closed_open_time: string | null;
 };
 
 export type Alert = {

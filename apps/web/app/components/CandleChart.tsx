@@ -79,8 +79,12 @@ export default function CandleChart() {
   const customInvalid = preset === "CUSTOM" && from > to;
   const loading = !customInvalid && loadedKey !== key;
 
+  // Out-of-order responses (e.g. switching 30m -> 1h quickly) must not overwrite
+  // the newer selection: only the latest request may update the chart.
+  const seq = useRef(0);
   const load = useCallback(async () => {
     if (customInvalid) return;
+    const mine = ++seq.current;
     // Relative ranges are computed at fetch time, so "last week" stays current.
     const params: Record<string, string> = { interval, limit: "5000" };
     if (preset === "CUSTOM") {
@@ -91,6 +95,7 @@ export default function CandleChart() {
       if (days) params.start = new Date(Date.now() - days * 86_400_000).toISOString();
     }
     const res = await getBackend<CandlesResponse>("candles", params);
+    if (mine !== seq.current) return;
     if (res.ok) {
       setData(res.data);
       setError(null);
@@ -239,10 +244,12 @@ export default function CandleChart() {
 
   const last = useMemo(() => {
     if (!data) return null;
-    if (data.forming) return { c: data.forming, forming: true };
     const c = data.candles[data.candles.length - 1];
+    // Same rule as the chart: the forming bar only if it is newer than the last closed bar.
+    if (data.forming && (!c || data.forming.t > c.t)) return { c: data.forming, forming: true };
     return c ? { c, forming: false } : null;
   }, [data]);
+  const staleSeries = data != null && preset !== "CUSTOM" && !data.fresh;
   const shown = legend ?? last;
 
   return (
@@ -316,6 +323,12 @@ export default function CandleChart() {
         </span>
         <span>{gaps.length > 0 ? <span style={{ color: "var(--warn)" }}>{gaps.length} פערים בטווח המוצג</span> : data ? "אין פערים בטווח המוצג" : ""}</span>
       </div>
+      {staleSeries && (
+        <p role="alert" className="mt-2 alert alert-warn">
+          הנתונים בגרף אינם עדכניים: הנר הסגור האחרון הוא מ־<bdi dir="ltr">{fmtUtc(data?.last_closed_open_time)} UTC</bdi>
+          {data?.stale_forming_open_time ? " (נר פתוח ישן אינו מוצג)" : ""}. ייתכן ששירות האיסוף אינו פעיל.
+        </p>
+      )}
       {customInvalid && <p className="mt-2 text-sm err">{explain("START_AFTER_END")}</p>}
       {error && <p className="mt-2 text-sm err">{explain(error)}</p>}
     </section>

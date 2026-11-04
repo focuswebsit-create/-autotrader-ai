@@ -38,7 +38,7 @@ from autotrader.worker.discovery_job import run_discovery_once
 log = logging.getLogger("autotrader.collector")
 
 DISCOVERY_EVERY_S = 300
-LOCK_CHECK_EVERY_S = 30
+LOCK_CHECK_EVERY_S = 10
 
 
 async def _discovery_loop(stop: asyncio.Event, run: object) -> None:

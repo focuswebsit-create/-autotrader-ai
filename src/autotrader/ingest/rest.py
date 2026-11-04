@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from autotrader.common.http import InfoApiError
@@ -85,26 +87,44 @@ def ingest_rest(
     start: datetime,
     end: datetime,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    write_lock: AbstractContextManager[Any] | None = None,
 ) -> IngestResult:
-    """Fetch [start, end] via REST and store it. Never raises for API/data problems."""
-    with sessions.begin() as s:
-        run = start_run(
-            s,
-            coin=coin,
-            interval=interval,
-            kind=kind,
-            requested_start=start,
-            requested_end=end,
-            now=clock(),
-        )
-        run_id = run.id
+    """Fetch [start, end] via REST and store it. Never raises for API/data/DB problems.
 
+    * A bar is marked closed only if it was already closed (end + grace) when the
+      request was SENT. Measuring at response time would freeze a partial bar
+      whenever the response is slow (review finding H1).
+    * ``write_lock`` (if given) is held only around database writes, never
+      during the network call, so a slow API cannot block other writers (M2).
+    """
+    lock: AbstractContextManager[Any] = write_lock or nullcontext()
+    try:
+        with lock, sessions.begin() as s:
+            run = start_run(
+                s,
+                coin=coin,
+                interval=interval,
+                kind=kind,
+                requested_start=start,
+                requested_end=end,
+                now=clock(),
+            )
+            run_id = run.id
+    except SQLAlchemyError as exc:
+        log.error("rest ingest not started: database", extra={"error": type(exc).__name__})
+        return IngestResult(
+            0, False, 0, 0, 0, 0, 0, 0, None, None, 0, f"DATABASE: {type(exc).__name__}"
+        )
+
+    requested_at = clock()
     try:
         raw = fetch_snapshot(source, coin, interval, start, end)
     except InfoApiError as exc:
-        return _fail(sessions, run_id, f"API_UNAVAILABLE: {exc}", clock)
+        return _fail(sessions, run_id, f"API_UNAVAILABLE: {exc}", clock, lock)
     if not isinstance(raw, list):
-        return _fail(sessions, run_id, "MALFORMED_RESPONSE: candleSnapshot is not a list", clock)
+        return _fail(
+            sessions, run_id, "MALFORMED_RESPONSE: candleSnapshot is not a list", clock, lock
+        )
 
     parsed = [parse_candle(r, coin=coin, interval=interval) for r in raw]
     good = [p for p in parsed if isinstance(p, Candle)]
@@ -112,26 +132,33 @@ def ingest_rest(
     candles, dup_findings = dedupe(good)
     now = clock()
 
-    with sessions.begin() as s:
-        stats = upsert_candles(s, candles, source="rest", now=now, run_id=run_id)
-        closed = [c for c in candles if c.is_closed_at(now)]
-        record_findings(s, coin, interval, dup_findings, now)
-        record_findings(s, coin, interval, stats.findings, now)
-        record_findings(s, coin, interval, find_outliers(closed, interval), now)
-        record_rejections(s, coin, interval, bad, now)
-        gaps = refresh_gaps(s, coin, interval, now)
-        run_row = s.get(IngestionRun, run_id)
-        assert run_row is not None
-        run_row.status = "OK"
-        run_row.received = len(raw)
-        run_row.inserted = stats.inserted
-        run_row.updated = stats.updated
-        run_row.unchanged = stats.unchanged
-        run_row.rejected = len(bad)
-        run_row.first_open_time = candles[0].open_time if candles else None
-        run_row.last_open_time = candles[-1].open_time if candles else None
-        run_row.raw_sha256 = raw_digest(raw)
-        run_row.finished_at = clock()
+    try:
+        with lock, sessions.begin() as s:
+            stats = upsert_candles(
+                s, candles, source="rest", now=now, run_id=run_id, closed_as_of=requested_at
+            )
+            closed = [c for c in candles if c.is_closed_at(requested_at)]
+            record_findings(s, coin, interval, dup_findings, now)
+            record_findings(s, coin, interval, stats.findings, now)
+            record_findings(s, coin, interval, find_outliers(closed, interval), now)
+            record_rejections(s, coin, interval, bad, now)
+            gaps = refresh_gaps(s, coin, interval, now)
+            run_row = s.get(IngestionRun, run_id)
+            assert run_row is not None
+            run_row.status = "OK"
+            run_row.received = len(raw)
+            run_row.inserted = stats.inserted
+            run_row.updated = stats.updated
+            run_row.unchanged = stats.unchanged
+            run_row.rejected = len(bad)
+            run_row.first_open_time = candles[0].open_time if candles else None
+            run_row.last_open_time = candles[-1].open_time if candles else None
+            run_row.raw_sha256 = raw_digest(raw)
+            run_row.finished_at = clock()
+    except SQLAlchemyError as exc:
+        # Nothing of this batch was stored (single transaction); the run must not
+        # stay RUNNING forever (review finding L3).
+        return _fail(sessions, run_id, f"DATABASE: {type(exc).__name__}", clock, lock)
 
     log.info(
         "rest ingest done",
@@ -162,15 +189,22 @@ def ingest_rest(
 
 
 def _fail(
-    sessions: sessionmaker[Session], run_id: int, error: str, clock: Callable[[], datetime]
+    sessions: sessionmaker[Session],
+    run_id: int,
+    error: str,
+    clock: Callable[[], datetime],
+    lock: AbstractContextManager[Any] | None = None,
 ) -> IngestResult:
     log.error("rest ingest failed", extra={"run_id": run_id, "error": error})
-    with sessions.begin() as s:
-        run_row = s.get(IngestionRun, run_id)
-        assert run_row is not None
-        run_row.status = "FAILED"
-        run_row.error = error
-        run_row.finished_at = clock()
+    try:
+        with lock or nullcontext(), sessions.begin() as s:
+            run_row = s.get(IngestionRun, run_id)
+            if run_row is not None:
+                run_row.status = "FAILED"
+                run_row.error = error
+                run_row.finished_at = clock()
+    except SQLAlchemyError:
+        log.error("could not mark ingestion run FAILED (database)", extra={"run_id": run_id})
     return IngestResult(run_id, False, 0, 0, 0, 0, 0, 0, None, None, 0, error)
 
 
@@ -181,6 +215,7 @@ def backfill(
     coin: str,
     interval: Interval,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    write_lock: AbstractContextManager[Any] | None = None,
 ) -> IngestResult:
     """Ask for ALL history; the API returns what it has (the most recent ~5,000 bars)."""
     return ingest_rest(
@@ -192,6 +227,7 @@ def backfill(
         start=EPOCH,
         end=clock(),
         clock=clock,
+        write_lock=write_lock,
     )
 
 
@@ -204,11 +240,16 @@ def sync_since(
     last_closed_open_time: datetime | None,
     kind: str,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    write_lock: AbstractContextManager[Any] | None = None,
 ) -> list[IngestResult]:
     """Fetch everything after the last closed bar (finalize + gap fill), chunked."""
     now = clock()
     if last_closed_open_time is None:
-        return [backfill(sessions, source, coin=coin, interval=interval, clock=clock)]
+        return [
+            backfill(
+                sessions, source, coin=coin, interval=interval, clock=clock, write_lock=write_lock
+            )
+        ]
     results: list[IngestResult] = []
     start = last_closed_open_time
     chunk = interval.delta * MAX_BARS_PER_REQUEST
@@ -224,6 +265,7 @@ def sync_since(
                 start=start,
                 end=end,
                 clock=clock,
+                write_lock=write_lock,
             )
         )
         if not results[-1].ok:

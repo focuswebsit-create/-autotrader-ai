@@ -79,8 +79,14 @@ def upsert_candles(
     source: Source,
     now: datetime,
     run_id: int | None = None,
+    closed_as_of: datetime | None = None,
 ) -> UpsertStats:
-    """Idempotently write bars of ONE coin/interval. See module docstring for rules."""
+    """Idempotently write bars of ONE coin/interval. See module docstring for rules.
+
+    ``closed_as_of``: for REST data, the time the request was SENT. A bar is
+    marked closed only if it had closed (end + grace) by then (defaults to now).
+    """
+    cutoff = closed_as_of or now
     stats = UpsertStats()
     if not candles:
         return stats
@@ -101,7 +107,7 @@ def upsert_candles(
         )
     }
     for c in candles:
-        closed = source == "rest" and c.is_closed_at(now)
+        closed = source == "rest" and c.is_closed_at(cutoff)
         row = existing.get(c.open_time)
         if row is None:
             row = CandleRow(
@@ -147,11 +153,14 @@ def upsert_candles(
                 stats.ignored_out_of_order += 1
             continue
 
-        # Forming bar.
-        if source == "ws" and (
-            c.volume < row.volume
-            or (c.trades is not None and row.trades is not None and c.trades < row.trades)
-        ):
+        # Forming bar. An update with less volume / fewer trades than stored is
+        # older data (out-of-order WS frame, or a REST snapshot older than the
+        # latest WS update) and must not rewind the bar - unless REST is closing
+        # it, in which case REST is the source of truth (review finding L2).
+        older = c.volume < row.volume or (
+            c.trades is not None and row.trades is not None and c.trades < row.trades
+        )
+        if older and not closed:
             stats.ignored_out_of_order += 1
             continue
         if same and not closed:
@@ -251,12 +260,18 @@ def record_findings(
 def record_rejections(
     session: Session, coin: str, interval: Interval, rejected: Iterable[Rejected], now: datetime
 ) -> int:
+    from datetime import UTC, timedelta
+
+    from autotrader.market.candles import CandleRejection
+
     n = 0
     for r in rejected:
-        # Bars that can't even be timed are anchored at epoch 0 so they stay unique per reason.
-        from datetime import UTC
-
-        anchor = r.open_time or datetime.fromtimestamp(0, tz=UTC)
+        # Bars that can't even be timed are anchored at epoch 0 + <reason index> s,
+        # so different reasons get separate rows instead of overwriting each other
+        # (review finding L4).
+        anchor = r.open_time or datetime.fromtimestamp(0, tz=UTC) + timedelta(
+            seconds=list(CandleRejection).index(r.reason)
+        )
         record_issue(
             session,
             coin=coin,

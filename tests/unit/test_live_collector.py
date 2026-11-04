@@ -185,7 +185,20 @@ def test_disconnect_triggers_reconnect_and_rest_gap_fill(
     second = FakeConn([*ws_frames, HANG])
     connector = Connector([first, second])
     c = make(sqlite_sessions, info, connector)
-    run_until(c, lambda: connector.attempts >= 2 and c.state.ws_state == "CONNECTED")
+
+    def gap_fills() -> int:
+        with sqlite_sessions() as s:
+            return len(
+                s.scalars(
+                    select(IngestionRun).where(
+                        IngestionRun.kind == "gap_fill", IngestionRun.status == "OK"
+                    )
+                ).all()
+            )
+
+    # The post-connect gap fill runs in the background (it must not block frame
+    # reading), so wait for it explicitly rather than for the connect itself.
+    run_until(c, lambda: connector.attempts >= 2 and gap_fills() >= 4)
 
     assert c.state.reconnects >= 1
     # After a successful reconnect the error is history, not a current problem.

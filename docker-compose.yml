@@ -58,7 +58,9 @@ services:
     # Market discovery, REST backfill, live WS stream, gap fill, heartbeat.
     command: ["autotrader", "collect"]
     restart: unless-stopped
-    stop_grace_period: 20s
+    # Shutdown waits for an in-flight REST sync to finish before releasing the
+    # single-writer lock (review M4); bounded by HTTP timeouts.
+    stop_grace_period: 90s
     depends_on: { migrate: { condition: service_completed_successfully } }
 
   web:

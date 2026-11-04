@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -34,6 +35,10 @@ HEARTBEAT_DOWN_AFTER = timedelta(seconds=60)
 WS_STALE_AFTER = timedelta(seconds=90)
 #: Allowed delay before a closed bar must be in the DB (finalize runs every 30 s).
 CLOSED_BAR_LAG_TOLERANCE = timedelta(minutes=3)
+#: A forming bar more than this past its end is a leftover, not a live bar.
+FORMING_MAX_LAG = timedelta(minutes=2)
+#: Rejected-candle alerts cover this recent window; older ones stay in the issue list.
+REJECTED_ALERT_WINDOW = timedelta(hours=24)
 MAX_CANDLES = 5_000
 
 
@@ -97,6 +102,21 @@ def expected_last_closed_open(interval: Interval, now: datetime) -> datetime:
     now_ms = int((now - CLOSE_GRACE).timestamp() * 1000)
     current_open_ms = now_ms - now_ms % ms
     return datetime.fromtimestamp((current_open_ms - ms) / 1000, tz=UTC)
+
+
+def recent_rejections(session: Session, coin: str, interval: Interval, since: datetime) -> int:
+    """Rejected bars detected recently (finding L4: old rejections must not alert forever)."""
+    return int(
+        session.scalar(
+            select(func.count()).where(
+                DataQualityIssue.coin == coin,
+                DataQualityIssue.interval == interval.value,
+                DataQualityIssue.issue_type == "REJECTED_CANDLE",
+                DataQualityIssue.last_detected_at >= since,
+            )
+        )
+        or 0
+    )
 
 
 def collector_status(session: Session, coin: str, now: datetime) -> dict[str, Any]:
@@ -192,7 +212,7 @@ def collector_status(session: Session, coin: str, now: datetime) -> dict[str, An
                     "missing_bars": cov.missing_bars,
                 }
             )
-        rejected = cov.open_issues.get("REJECTED_CANDLE", 0)
+        rejected = recent_rejections(session, coin, iv, now - REJECTED_ALERT_WINDOW)
         if rejected:
             alerts.append(
                 {
@@ -272,11 +292,29 @@ def build_router(
                 forming = (
                     forming_candle(s, settings.market_coin, interval) if include_forming else None
                 )
+                latest = closed_candles(s, settings.market_coin, interval, as_of=now, limit=1)
         except SQLAlchemyError as exc:
             raise HTTPException(status_code=503, detail="DATABASE_UNAVAILABLE") from exc
-        forming_open = _utc(forming.open_time) if forming is not None else None
-        if forming_open is not None and end_u is not None and forming_open >= end_u:
-            forming = None
+        last_closed_open = _utc(latest[-1].open_time) if latest else None
+        # Freshness of the series as a whole (independent of the requested range).
+        fresh = last_closed_open is not None and (
+            expected_last_closed_open(interval, now) - last_closed_open <= CLOSED_BAR_LAG_TOLERANCE
+        )
+        # Only a genuinely CURRENT forming bar may be shown as "open" (finding M3):
+        # newer than the last closed bar and not long past its end. A leftover
+        # forming row from a dead collector is reported separately, never as live.
+        stale_forming = None
+        if forming is not None:
+            f_open, f_close = _utc(forming.open_time), _utc(forming.close_time)
+            assert f_open is not None and f_close is not None
+            current = (last_closed_open is None or f_open > last_closed_open) and (
+                now <= f_close + FORMING_MAX_LAG
+            )
+            if not current:
+                stale_forming = f_open.isoformat()
+                forming = None
+            elif end_u is not None and f_open >= end_u:
+                forming = None
         return {
             "coin": settings.market_coin,
             "interval": interval.value,
@@ -286,6 +324,9 @@ def build_router(
             "candles": [candle_json(r) for r in rows],
             # The forming bar is for display only and is clearly separated.
             "forming": candle_json(forming) if forming is not None else None,
+            "stale_forming_open_time": stale_forming,
+            "fresh": fresh,
+            "last_closed_open_time": last_closed_open.isoformat() if last_closed_open else None,
         }
 
     @router.get("/data/report")

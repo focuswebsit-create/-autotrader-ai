@@ -99,15 +99,23 @@ def ws_frames() -> list[str]:
 
 
 @pytest.fixture
-def sqlite_sessions() -> Any:
+def sqlite_sessions(tmp_path: Any) -> Any:
+    """File-backed SQLite with one connection PER SESSION, like PostgreSQL.
+
+    (An in-memory StaticPool shares ONE connection across threads: a session
+    closing in one thread rolls back another thread's transaction - a test
+    artifact that hid/created races the production database cannot have.)
+    """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.pool import NullPool
 
     from autotrader.db.models import Base
 
     engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+        f"sqlite:///{tmp_path / 'test.db'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+        poolclass=NullPool,
     )
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
