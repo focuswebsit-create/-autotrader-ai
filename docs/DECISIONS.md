@@ -109,3 +109,9 @@ The database keeps all bars it has ever collected, so coverage grows over time w
 - The login users `autotrader_api` and `autotrader_worker` come from `infra/db/roles.sql` (run automatically by the compose DB on first start).
 - Only migrations use the owner account.
 - A test asserts every table is granted to both roles, so future tables can't be forgotten.
+
+## ADR-020 — Closing is decided at request time; shutdown drains writers (2026-11-04, final review)
+- A REST snapshot can close a bar only if the bar had ended (plus 5 s) **when the request was sent**, never by the response time. A slow response must not freeze partial data (H1).
+- Candle writes hold `_write_lock` only around DB transactions; whole REST syncs are serialised by `_sync_lock`, and network I/O never holds the write lock (M2).
+- On shutdown the collector drains in-flight syncs and refuses new writes **before** reporting STOPPED and before the single-writer lock is released (M4). `autotrader backfill` takes the same lock.
+- Closed candles are immutable in the database itself (migration 0004 trigger).

@@ -163,6 +163,7 @@ Active attempts against the running system (run at 16:09 UTC):
 
 Local, Python 3.12 + PostgreSQL 16, with `RUN_LIVE_TESTS=1`:
 - **ruff** clean · **mypy --strict** clean (41 files).
+- **pytest after the final review: 305 passed** (301 + 4 live mainnet); 12 consecutive full runs green. Before the final review:
 - **pytest: 286 passed**:
   - 262 unit: safety 90, discovery 41, WS guard 29, candles 25, API 15 + market API 13, collector 11, resilience 9, storage 8, static 8, REST ingest 7, CLI 6;
   - 20 PostgreSQL;
@@ -171,6 +172,35 @@ Local, Python 3.12 + PostgreSQL 16, with `RUN_LIVE_TESTS=1`:
 - **Browser checks:** desktop 1366 px and iPhone 14; no horizontal scroll, no console errors, CSP intact.
 - **CI on GitHub:** backend ✔, frontend ✔, docker ✔. The final commit's CI result is reported in the PR.
 
+## 7b. Final independent review (2026-11-04) and fixes
+
+An independent reviewer (no access to the author's conclusions) reviewed the full Phase 1 diff against `main`. **No critical issues**: no path to orders or signed actions, user channels or wallet keys. Every finding below was reproduced or checked, fixed, and covered by a regression test (`tests/unit/test_phase1_review_regressions.py`, plus PostgreSQL tests). The H1, M1 and M2 tests were also run against the *old* code and **fail there**, so they really catch the bugs.
+
+| ID | Severity | Finding | Fix |
+|---|---|---|---|
+| H1 | High | A bar could be marked closed (and frozen) from a snapshot **requested before it closed** when the response was slow. Reproduced: request at 15:59:59, response at 16:00:06 → `is_closed=True` | "Closed" is decided by the time the request was **sent** (`closed_as_of`) |
+| M1 | Medium | Reconnect backoff never reset after a successful session, so after ~7 drops (even days apart) every reconnect waited 30–60 s | Backoff resets after any session that connected |
+| M2 | Medium | The write lock was held during the REST HTTP call, so a slow API stalled WS frame handling and forced stale-reconnect loops | Lock only around DB writes; separate sync lock; post-connect gap fill runs in the background |
+| M3 | Medium | UI could show stale data as live: a leftover forming bar from a dead collector drawn as the current bar; "(live)" prices while the collector was down; out-of-order responses could show 30m under the "1h" button | API returns `forming` only if current (plus `stale_forming_open_time` and `fresh`); stale-data banner on the chart; "(last known)" + dimmed prices unless connected and recent; out-of-order responses dropped |
+| M4 | Medium | After `run()` returned, a still-running sync thread could write after the STOPPED heartbeat and after the lock was released. `autotrader backfill` ignored the writer lock | Shutdown drains in-flight syncs and refuses new writes before STOPPED and before the lock is released; CLI backfill takes the lock (exit 5 if a collector runs) |
+| L1 | Low | Closed-bar immutability was enforced only in code | Migration 0004: DB trigger rejects any UPDATE of a closed candle (verified as `autotrader_worker`) |
+| L2 | Low | An older REST snapshot could rewind a forming bar updated by WS | Same volume/trade-count rule for REST unless REST is closing the bar |
+| L3 | Low | A DB error while storing left the ingestion run RUNNING forever; made one collector test flaky | Store failure marks the run FAILED; flakiness gone (12/12 full runs green) |
+| L4 | Low | Untimed rejections overwrote each other; REJECTED alerts never expired | One row per reason; the alert covers the last 24 h (history kept in the issue list) |
+| L5 | Low | Trade count `n` accepted floats, bools and negatives | Strict non-negative int32 |
+| L7 | Low | Lock-loss detection window of 30 s | 10 s |
+| L8 | Low | Duplicate JSON keys could be read differently by the guard and by a server | Outgoing REST and WS payloads with duplicate keys are rejected |
+
+**Fixed in the tests themselves:**
+- The unit-test SQLite fixture used one in-memory connection shared by all threads, so one session's rollback could undo another thread's transaction. It now uses a file-backed DB with one connection per session, like PostgreSQL.
+- A collector test now waits for the background gap fill it asserts on.
+
+**Accepted, documented (no code change):**
+- **L6:** values with more than 18 decimals would compare unequal after NUMERIC rounding. Hyperliquid prices have at most 6 decimals.
+- **Lock DoS:** any DB role, including the read-only one, can take the collector's advisory-lock key and stop it from starting (exit 5). That needs DB credentials and can only *block* writes, never make them. PostgreSQL has no per-key permission for advisory locks.
+
+**Deployed to the running dev system:** migration 0004 applied and the collector gracefully restarted. Closed bar counts were identical before and after, `RUNNING/CONNECTED`, no errors, `fresh=true`.
+
 ## 8. Known limitations
 1. **History depth** is limited by the API (~5,000 bars per interval: 30m ≈ 104 days, 1h ≈ 208 days). That's enough for development and validation, but **thin for a statistically strong backtest**, especially at 1h. Phase 2 must report sample sizes and label results INCONCLUSIVE when appropriate. Coverage grows as long as the collector keeps running.
 2. **Closed-bar latency:** a bar becomes "closed" in the DB about 5–35 s after the period ends (grace + 30 s finalize cycle).
@@ -178,7 +208,7 @@ Local, Python 3.12 + PostgreSQL 16, with `RUN_LIVE_TESTS=1`:
 4. **(Resolved)** Bars closing during an outage: verified live by the ~14.5-hour outage on 2026-11-04 (§4.2). Note that while the collector is down **no new data is collected**: the gap is filled on restart only because the API still serves those bars. Outages longer than the API window (~104 days at 30m) would lose data permanently, so production needs a restart policy and alerting.
 5. **External WTI session calendar** (blueprint §2.5) is not implemented yet. It is needed before any paper entries (Phase 3). Phase 1 only collects data.
 6. **No authentication** on the web or API yet (read-only, localhost-bound). Required before any online exposure (Phase 4).
-7. **The advisory lock** prevents two collectors per database. Running collectors against *different* databases is allowed by design (the isolated chaos test relied on this).
+7. **The advisory lock** prevents two writers per database (collector or CLI backfill). Running collectors against *different* databases is allowed by design (the isolated chaos test relied on this). Any role with DB access can take the lock key and block the collector from starting (it cannot write anything).
 8. **`hyperliquid.gitbook.io` is blocked** from this environment. The fee and tick-size notes (ADR-004/005) are still not re-verified against the docs.
 9. **REST rate limits:** heavy full-history requests from a shared egress can hit HTTP 429. The collector only makes small incremental requests, but large manual backfills should be spaced out.
 
