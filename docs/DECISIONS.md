@@ -174,3 +174,29 @@ The database keeps all bars it has ever collected, so coverage grows over time w
 - Observed: every one of the 5,000 30m bars (and 5,000 1h bars) has trades, with at least 31 trades per 30m bar, including all weekends and CME holidays. There are no gaps.
 - While CME is closed, median 30m volume is ≈5.6× lower (6,994 vs 39,253) and there are ≈2.3× fewer trades. That is the basis for the entry filter and for the 2× off-hours spread/slippage assumption.
 - The engine never blocks exits on CME hours. Entry blocks are categorised (`STRATEGY_FILTER`, `RISK`, `DATA`, `MARKET`, `SIMULATION`); CME-based codes are `STRATEGY_FILTER`, not "market closed". Reports include a `market_hours` section computed from the data.
+
+## ADR-031 — Forward tests are frozen, journaled and recomputed (2026-11-04, Phase 2.5)
+- `autotrader forward freeze` creates one **immutable** `forward_tests` row per strategy. It stores:
+  - parameters (with hash), cost model, risk limits and execution settings;
+  - verdict thresholds;
+  - the git commit and `code_hash`, a sha256 of the strategy and engine source files;
+  - the latest backtest with the **same parameter hash**, as the reference expectation.
+- The test starts at the next 30m boundary after freezing, and is always later than the exposed data (ADR-029).
+- One active test per strategy. A stopped test is never resumed; a new freeze is a new test.
+- The forward worker appends one `forward_decisions` row per closed 30m bar after the start, holding:
+  - the decision and its reason, and the indicator rationale;
+  - a market snapshot: OHLCV, last funding, and mark/oracle when a fresh discovery exists;
+  - the strategy version, the parameter and code hashes, and an input digest;
+  - `evaluated_at` and a `late` flag for catch-up after an outage.
+- Database triggers reject UPDATE/DELETE on all forward tables, and reject decisions for bars before the start. A CHECK enforces `evaluated_at >= bar_close_time`.
+- Indicators always start at the frozen `history_anchor` (the first stored 30m bar), so every decision can be reproduced bit-for-bit later. Bars before the anchor are not used, so the 1h trend EMAs differ negligibly from a backtest that has 208 days of 1h history.
+- If `code_hash` changes, the worker writes `INTEGRITY_HALT` and records nothing more. Strategies can't be "improved" mid-test.
+- **Results are never stored.** Every report is recomputed from the frozen config, the journal, the immutable candles and the append-only funding. It uses the same `Engine` as the backtest, in `live_edge` mode: an open position stays open, and a signal on the last bar waits for the next bar.
+- Bars that closed but were not yet journaled are not simulated.
+- Comparison with the backtest:
+  - **Parity:** each journal decision is recomputed with the backtest code path, and any mismatch makes the result INVALID.
+  - **Consistency:** expectancy, win rate, profit factor, trades and signals per day, and drawdown vs the reference run. "Consistent" means the backtest expectancy lies inside the forward 95% CI, judged only with ≥ 10 forward trades.
+- Verdict:
+  - INCONCLUSIVE until ≥ 30 closed trades, ≥ 30 days and ≥ 15 distinct trade days.
+  - Then PASS only if the CI is above 0 and the strategy is still profitable at 2× costs; FAIL if the CI is below 0.
+  - INVALID on a code change, a parity mismatch or an audit violation.

@@ -107,6 +107,9 @@ def audit(
         if n > risk.max_entries_per_day:
             v.append(f"RISK {n} entries on {day} > {risk.max_entries_per_day}")
     total = result.initial_equity + sum((t.net_pnl for t in result.trades), Decimal(0))
+    if result.open_trade is not None:
+        # live edge: the open position's entry fee and funding are already paid in cash
+        total -= result.open_trade.entry_fee + result.open_trade.funding
     if total != result.final_equity:
         v.append(f"ACCOUNTING final equity {result.final_equity} != initial + net {total}")
     for p in result.equity:

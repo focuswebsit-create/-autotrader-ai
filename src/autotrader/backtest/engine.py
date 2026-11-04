@@ -239,6 +239,12 @@ class BacktestResult:
     trade_window: tuple[datetime | None, datetime | None]
     bars_in_window: int
     halted: str | None = None
+    #: live edge only: the position still open at the last bar (not in ``trades``)
+    open_trade: Trade | None = None
+    #: unrealized P&L of ``open_trade`` at the last close (fees/funding already in cash)
+    open_trade_mark: Decimal | None = None
+    #: live edge only: a signal accepted at the last bar, waiting for the next bar
+    pending: SignalRecord | None = None
 
 
 @dataclass
@@ -298,6 +304,7 @@ class Engine:
         funding: FundingBook,
         trade_start: datetime | None = None,
         trade_end: datetime | None = None,
+        live_edge: bool = False,
     ) -> None:
         costs.validate()
         risk.validate()
@@ -307,6 +314,10 @@ class Engine:
         self.costs, self.risk, self.ex = costs, risk, execution
         self.funding = funding
         self.trade_start, self.trade_end = trade_start, trade_end
+        #: Forward testing: the data ends at "now", not at the end of a test window. An
+        #: open position stays open (marked to the last close) and a signal on the last
+        #: closed bar waits for the next bar instead of being blocked.
+        self.live_edge = live_edge
         self.rng = random.Random(execution.seed)  # noqa: S311 - seeded simulation, not crypto
 
         self.cash = risk.initial_equity
@@ -474,12 +485,16 @@ class Engine:
             return self.halted, None
         k = i + 1 + self.ex.extra_entry_delay_bars
         expected_open = t + (bar.close_time - bar.open_time) * self.ex.extra_entry_delay_bars
+        if self.live_edge:
+            if k >= len(self.bars):
+                # the next bar has not happened yet: the entry is pending, not blocked
+                return None, k
         # the last bar of the data/window is reserved for the forced END_OF_DATA exit
-        if k >= len(self.bars) - 1:
+        elif k >= len(self.bars) - 1:
             return "NO_NEXT_BAR", None
-        if self.bars[k].open_time != expected_open:
+        if k < len(self.bars) and self.bars[k].open_time != expected_open:
             return "DATA_GAP", None
-        entry_at = self.bars[k].open_time
+        entry_at = self.bars[k].open_time if k < len(self.bars) else expected_open
         s = self.ex.session
         if s is not None:
             reason = s.entry_block_reason(entry_at) or (
@@ -620,7 +635,10 @@ class Engine:
                 self._process_exits(k)
             if self.pos is not None:
                 self.pos.bars_held += 1
-            last_in_window = k == n - 1
+            last_in_window = k == n - 1 and not self.live_edge
+            if self.live_edge and k == n - 1 and self.pos is not None:
+                # funding up to "now" for the still-open position
+                self._accrue_funding(bar.close_time, bar.close)
             if self.pos is not None and last_in_window:
                 self._accrue_funding(bar.close_time, bar.close)
                 self._close(bar, bar.close_time, bar.close, ExitReason.END_OF_DATA, market=True)
@@ -633,6 +651,23 @@ class Engine:
             if self.pos is None and self.pending is None and not last_in_window:
                 self._decide(k)
         final = self.cash
+        open_trade = self.pos
+        pending = None
+        if self.pending is not None and self.pending.fill_index >= n:
+            p = self.pending
+            assert p.decision.side is not None
+            pending = SignalRecord(
+                bars[p.signal_index].close_time,
+                p.decision.side,
+                "PENDING",
+                "AWAITING_NEXT_BAR",
+                None,
+                p.decision.rationale,
+            )
+            self.signals.append(pending)
+        if open_trade is not None:
+            # still open (live edge only): not part of the closed-trade list
+            self.trades.remove(open_trade)
         return BacktestResult(
             trades=self.trades,
             signals=self.signals,
@@ -646,6 +681,9 @@ class Engine:
             trade_window=(self.trade_start, self.trade_end),
             bars_in_window=self.bars_in_window,
             halted=self.halted,
+            open_trade=open_trade,
+            open_trade_mark=self._mark(bars[-1].close) - self.cash if open_trade and bars else None,
+            pending=pending,
         )
 
     def _update_excursions(self, bar: Bar) -> None:

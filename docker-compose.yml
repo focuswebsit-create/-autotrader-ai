@@ -63,6 +63,17 @@ services:
     stop_grace_period: 90s
     depends_on: { migrate: { condition: service_completed_successfully } }
 
+  forward:
+    build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
+    environment:
+      <<: *backend_env
+      AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader_worker:${AUTOTRADER_WORKER_DB_PASSWORD:-worker-local-only}@db:5432/${POSTGRES_DB:-autotrader}
+    # Phase 2.5: records frozen strategies' decisions as 30m bars close (PAPER, no orders).
+    # Tests are frozen once with: docker compose run --rm forward autotrader forward freeze
+    command: ["autotrader", "forward", "run"]
+    restart: unless-stopped
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
   web:
     build: { context: ., dockerfile: infra/docker/web.Dockerfile }
     environment:

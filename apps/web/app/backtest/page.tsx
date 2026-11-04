@@ -18,6 +18,10 @@ export default function BacktestPage() {
           </p>
         </div>
         <nav className="text-sm">
+          <Link href="/forward" className="underline">
+            Forward Testing
+          </Link>{" "}
+          ·{" "}
           <Link href="/" className="underline">
             ← לוח נתוני שוק
           </Link>

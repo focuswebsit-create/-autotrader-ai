@@ -138,6 +138,10 @@ export default async function Home() {
         <nav className="mt-2 text-sm">
           <Link href="/backtest" className="underline">
             מעבדת Backtest (שלב 2) ←
+          </Link>{" "}
+          ·{" "}
+          <Link href="/forward" className="underline">
+            Forward Testing (שלב 2.5) ←
           </Link>
         </nav>
       </header>

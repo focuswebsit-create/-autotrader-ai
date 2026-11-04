@@ -27,3 +27,6 @@ apps/web/next-env.d.ts
 .DS_Store
 .idea/
 .vscode/
+
+# local database backups (docker-compose.prod.yml)
+backups/

@@ -38,6 +38,27 @@ def test_all_routes_are_read_only(sessions: sessionmaker[Session]) -> None:
                 assert word not in route.path.lower(), route.path
 
 
+def test_every_route_including_routers_is_read_only(sessions: sessionmaker[Session]) -> None:
+    """Routes added with include_router are nested objects in app.routes on recent
+    FastAPI versions, so the check above can't see them. The OpenAPI schema lists every
+    route; each must be GET-only, and every write method must be refused for real."""
+    from fastapi.testclient import TestClient
+
+    app = create_app(Settings(), sessions)
+    paths = app.openapi()["paths"]
+    assert len(paths) >= 14
+    assert any(p.startswith("/api/forward") for p in paths)
+    assert any(p.startswith("/api/backtest") for p in paths)
+    client = TestClient(app)
+    for path, ops in paths.items():
+        assert set(ops) <= {"get", "head"}, (path, ops)
+        for word in ("order", "exchange", "withdraw", "wallet", "key", "sign"):
+            assert word not in path.lower(), path
+        concrete = path.replace("{run_id}", "1").replace("{test_id}", "1")
+        for method in ("post", "put", "patch", "delete"):
+            assert client.request(method, concrete).status_code == 405, (method, path)
+
+
 def test_health_reports_paper(sessions: sessionmaker[Session]) -> None:
     client = TestClient(create_app(Settings(), sessions))
     body = client.get("/health").json()

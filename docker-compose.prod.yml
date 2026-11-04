@@ -1,0 +1,63 @@
+# Production overrides for a single always-on server (PAPER-ONLY; see docs/DEPLOYMENT.md).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Nothing here adds a network listener on a public interface: db/api/web stay bound to
+# 127.0.0.1 and are reached only through the private access layer (Tailscale or a
+# reverse proxy with authentication, see infra/deploy/).
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "10" }
+
+services:
+  db:
+    restart: always
+    <<: *logging
+  api:
+    restart: always
+    <<: *logging
+  collector:
+    restart: always
+    <<: *logging
+  forward:
+    restart: always
+    <<: *logging
+    environment:
+      AUTOTRADER_GIT_SHA: ${AUTOTRADER_GIT_SHA:-unknown}
+  web:
+    restart: always
+    <<: *logging
+
+  # Nightly logical backup (custom format) + integrity check; keeps BACKUP_KEEP_DAYS.
+  # Copy /backups off the server (see docs/DEPLOYMENT.md "Off-site backups").
+  backup:
+    image: postgres:16
+    restart: always
+    <<: *logging
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-autotrader}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-autotrader}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
+    volumes:
+      - ./infra/deploy/backup.sh:/backup.sh:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+    entrypoint: ["bash", "/backup.sh", "loop"]
+    depends_on: { db: { condition: service_healthy } }
+
+  # Dead-man's switch: every 5 min ask the pipeline health endpoint and ping an external
+  # monitor (e.g. healthchecks.io). If the server, Docker, DB, collector or forward
+  # worker dies, the pings stop or turn into /fail and the external service alerts you.
+  monitor:
+    image: curlimages/curl:8.10.1
+    restart: always
+    <<: *logging
+    environment:
+      HEALTHCHECK_PING_URL: ${HEALTHCHECK_PING_URL:-}
+    volumes:
+      - ./infra/deploy/monitor.sh:/monitor.sh:ro
+    entrypoint: ["sh", "/monitor.sh"]
+    depends_on: { api: { condition: service_healthy } }

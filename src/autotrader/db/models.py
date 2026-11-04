@@ -293,7 +293,7 @@ class ServiceHeartbeat(Base):
             "state IN ('STARTING','RUNNING','DEGRADED','STOPPED')", name="ck_heartbeat_state"
         ),
         CheckConstraint(
-            "ws_state IN ('DISCONNECTED','CONNECTING','CONNECTED','STALE')",
+            "ws_state IN ('DISCONNECTED','CONNECTING','CONNECTED','STALE','NOT_APPLICABLE')",
             name="ck_heartbeat_ws_state",
         ),
     )
@@ -383,4 +383,93 @@ class BacktestTrade(Base):
         CheckConstraint("side IN ('LONG','SHORT')", name="ck_backtest_trades_side"),
         CheckConstraint("exit_time >= entry_time", name="ck_backtest_trades_times"),
         CheckConstraint("entry_time >= signal_time", name="ck_backtest_trades_no_lookahead"),
+    )
+
+
+# --------------------------------------------------------------------------- Phase 2.5
+
+
+class ForwardTest(Base):
+    """A frozen forward test: strategy, parameters, costs, risk and code are fixed at
+    creation and can never change (UPDATE/DELETE rejected by trigger)."""
+
+    __tablename__ = "forward_tests"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    coin: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: sha256 of the strategy/engine source files at freeze time
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: full frozen configuration (params, costs, risk, execution, thresholds, reference)
+    config: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: indicator history always starts here (makes every decision reproducible)
+    history_anchor: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: first decision is for the 30m bar opening at this instant (after creation)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("starts_at >= created_at", name="ck_forward_tests_future_start"),
+        CheckConstraint("history_anchor < starts_at", name="ck_forward_tests_anchor"),
+        Index("ix_forward_tests_strategy", "coin", "strategy_id"),
+    )
+
+
+class ForwardDecision(Base):
+    """One strategy decision per closed 30m bar of a forward test (append-only)."""
+
+    __tablename__ = "forward_decisions"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    test_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("forward_tests.id", ondelete="RESTRICT"), nullable=False
+    )
+    bar_open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bar_close_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: wall-clock time the decision was made and stored
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: evaluated well after the bar closed (catch-up after an outage)
+    late: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    side: Mapped[str | None] = mapped_column(String(8))
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    atr: Mapped[Decimal | None] = mapped_column(Price)
+    rationale: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    market: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: sha256 of the input bars the decision used
+    input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("test_id", "bar_open_time", name="uq_forward_decisions_bar"),
+        CheckConstraint("side IS NULL OR side IN ('LONG','SHORT')", name="ck_fd_side"),
+        CheckConstraint("evaluated_at >= bar_close_time", name="ck_fd_no_lookahead"),
+        Index("ix_forward_decisions_signals", "test_id", "side", "bar_open_time"),
+    )
+
+
+class ForwardEvent(Base):
+    """Lifecycle and integrity events of a forward test (append-only)."""
+
+    __tablename__ = "forward_events"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    test_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("forward_tests.id", ondelete="RESTRICT"), nullable=False
+    )
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "event IN ('STARTED','STOPPED','INTEGRITY_HALT','DATA_GAP','DATA_STALE')",
+            name="ck_forward_events_event",
+        ),
+        Index("ix_forward_events_test", "test_id", "id"),
     )

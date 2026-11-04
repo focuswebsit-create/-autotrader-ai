@@ -278,6 +278,70 @@ def _backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _forward(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
+    from autotrader.db.models import ForwardTest
+    from autotrader.forward.evaluate import evaluate
+    from autotrader.forward.recorder import create_test, stop_test, test_state
+    from autotrader.forward.worker import run_forever, tick_all
+    from autotrader.strategy.strategies import STRATEGIES
+
+    check_environment()
+    assert_paper_mode()
+    env = _require_db()
+    if env is None:
+        return 3
+    settings, sessions = env
+    coin = settings.market_coin
+    now = datetime.now(UTC)
+    if args.forward_cmd == "freeze":
+        ids = list(STRATEGIES) if args.strategy == "all" else [args.strategy]
+        out = []
+        for sid in ids:
+            try:
+                with sessions.begin() as s:
+                    t = create_test(s, coin, sid, now=now)
+                    out.append(
+                        {
+                            "id": t.id,
+                            "strategy_id": sid,
+                            "starts_at": t.starts_at.isoformat(),
+                            "config_sha256": t.config_sha256,
+                            "code_hash": t.code_hash,
+                        }
+                    )
+            except ValueError as exc:
+                out.append({"strategy_id": sid, "error": str(exc)})
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0 if all("id" in o for o in out) else 2
+    if args.forward_cmd == "tick":
+        res = tick_all(sessions, coin, now)
+        print(json.dumps([r.__dict__ for r in res], indent=2, default=str))
+        return 0
+    if args.forward_cmd == "run":
+        with InfoClient() as client:
+            run_forever(sessions, coin, client)
+        return 0
+    if args.forward_cmd == "stop":
+        with sessions.begin() as s:
+            stop_test(s, args.id, reason=args.reason, now=now)
+        print(json.dumps({"ok": True, "id": args.id, "state": "STOPPED"}))
+        return 0
+    # status
+    with sessions() as s:
+        tests = list(s.query(ForwardTest).filter(ForwardTest.coin == coin).order_by(ForwardTest.id))
+        out = []
+        for t in tests:
+            r = evaluate(s, t, now=now)
+            out.append({"id": t.id, "strategy": t.strategy_id, "state": test_state(s, t.id),
+                        "verdict": r["verdict"]["status"], "progress": r["progress"],
+                        "net_pnl": (r["summary"] or {}).get("net_pnl"),
+                        "parity_mismatches": r["parity"]["mismatches"]})  # fmt: skip
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _collect(_: argparse.Namespace) -> int:
     from autotrader.collector_main import main as collector_main
 
@@ -321,6 +385,17 @@ def main(argv: list[str] | None = None) -> int:
         "dataset; keeps later, never-seen data untouched)",
     )
     bt.set_defaults(func=_backtest)
+    fw = sub.add_parser("forward", help="Phase 2.5 forward testing (PAPER, no orders)")
+    fws = fw.add_subparsers(dest="forward_cmd", required=True)
+    ff = fws.add_parser("freeze", help="freeze strategies and start forward tests")
+    ff.add_argument("--strategy", default="all", choices=["all", *STRATEGIES])
+    fws.add_parser("tick", help="record decisions for newly closed bars once")
+    fws.add_parser("run", help="run the forward worker (records as bars close)")
+    fws.add_parser("status", help="results of all forward tests (JSON)")
+    fst = fws.add_parser("stop", help="stop a forward test (append-only event)")
+    fst.add_argument("--id", type=int, required=True)
+    fst.add_argument("--reason", required=True)
+    fw.set_defaults(func=_forward)
     co = sub.add_parser("collect", help="run the live market-data collector")
     co.set_defaults(func=_collect)
     args = parser.parse_args(argv)
