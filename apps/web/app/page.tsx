@@ -136,6 +136,10 @@ export default async function Home() {
           מנוע נתוני שוק · נתונים ציבוריים מ־Hyperliquid Mainnet (קריאה בלבד). אין ביצוע עסקאות אמיתיות.
         </p>
         <nav className="mt-2 text-sm">
+          <Link href="/terminal" className="font-semibold underline">
+            טרמינל מסחר וירטואלי (שלב 3) ←
+          </Link>{" "}
+          ·{" "}
           <Link href="/backtest" className="underline">
             מעבדת Backtest (שלב 2) ←
           </Link>{" "}
