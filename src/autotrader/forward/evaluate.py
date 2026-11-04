@@ -21,6 +21,7 @@ survives 2x costs, FAIL if the CI is entirely below zero.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -41,7 +42,7 @@ from autotrader.forward.freeze import (
     strategy_code_hash,
     thresholds_from_config,
 )
-from autotrader.forward.recorder import STALE_AFTER, load_bars, test_state
+from autotrader.forward.recorder import STALE_AFTER, input_digest, load_bars, test_state
 from autotrader.ingest.funding import load_funding
 from autotrader.strategy.base import Bar, Decision, Side
 from autotrader.strategy.strategies import build_strategy
@@ -80,6 +81,11 @@ def _run(
     costs = costs_from_config(cfg)
     if cost_scale != 1:
         costs = costs.scaled(fee=cost_scale, spread=cost_scale, slippage=cost_scale)
+        costs = replace(
+            costs,
+            funding_multiplier=costs.funding_multiplier * cost_scale,
+            missing_funding_rate=costs.missing_funding_rate * cost_scale,
+        )
     risk = risk_from_config(cfg)
     ex = execution_from_config(cfg)
     res = Engine(
@@ -162,7 +168,19 @@ def evaluate(session: Session, test: ForwardTest, *, now: datetime) -> dict[str,
     code_ok = strategy_code_hash() == test.code_hash
     summary = summarize(result) if result else None
     trades = result.trades if result else []
-    observed_days = max((now - starts_at).total_seconds() / 86400, 0.0)
+    # Observation time counts only bars actually decided (not wall-clock time, which
+    # would grow while the collector is down or after the test stopped).
+    last_rec_close = _utc(rows[-1].bar_close_time) if rows else starts_at
+    observed_days = max((last_rec_close - starts_at).total_seconds() / 86400, 0.0)
+    same_strategy_tests = len(
+        list(
+            session.scalars(
+                select(ForwardTest.id).where(
+                    ForwardTest.coin == test.coin, ForwardTest.strategy_id == test.strategy_id
+                )
+            )
+        )
+    )
     th = thresholds_from_config(cfg)
     trade_days = len({t.exit_time.astimezone(UTC).date() for t in trades if t.exit_time})
     fwd = _stats(trades)
@@ -183,6 +201,8 @@ def evaluate(session: Session, test: ForwardTest, *, now: datetime) -> dict[str,
             "created_at": _utc(test.created_at).isoformat(),
             "starts_at": starts_at.isoformat(),
             "history_anchor": _utc(test.history_anchor).isoformat(),
+            # every test ever frozen for this strategy is listed: restarts are visible
+            "tests_frozen_for_strategy": same_strategy_tests,
             "thresholds": cfg["thresholds"],
             "costs": cfg["costs"],
             "risk": cfg["risk"],
@@ -237,7 +257,14 @@ def evaluate(session: Session, test: ForwardTest, *, now: datetime) -> dict[str,
             for e in events
         ],
         "parity": parity,
-        "comparison": _compare(ref, fwd, summary, observed_days, sum(1 for r in rows if r.side)),
+        # signals the engine evaluated while flat - the same definition as the backtest's
+        "comparison": _compare(
+            ref,
+            fwd,
+            summary,
+            observed_days,
+            result.decision_counts.get("SIGNAL", 0) if result else 0,
+        ),
         "stress_2x_costs_net": (
             str(sum((t.net_pnl for t in stress.trades), Decimal(0)).quantize(Decimal("0.0001")))
             if stress
@@ -309,6 +336,10 @@ def _parity(
             mism.append({"bar": _utc(r.bar_open_time).isoformat(), "issue": "BAR_MISSING_NOW"})
             continue
         d = prepared.decide(i)
+        if input_digest(m30, i, h1) != r.input_digest:
+            # the candles/trend bars this decision used were revised or a gap was filled
+            mism.append({"bar": _utc(r.bar_open_time).isoformat(), "issue": "INPUT_DATA_CHANGED"})
+            continue
         same = (
             (d.side.value if d.side else None) == r.side
             and d.reason == r.reason
@@ -394,7 +425,11 @@ def forward_verdict(
         ("live_replay_parity", parity_ok, "every stored decision reproduces exactly"),
         ("zero_audit_violations", violations == 0, f"{violations} violations"),
         ("min_trades", n >= th.min_trades, f"{n} / {th.min_trades} closed trades"),
-        ("min_days", observed_days >= th.min_days, f"{observed_days:.1f} / {th.min_days} days"),
+        (
+            "min_days",
+            observed_days >= th.min_days,
+            f"{observed_days:.1f} / {th.min_days} days of recorded bars",
+        ),
         (
             "min_trade_days",
             trade_days >= th.min_trade_days,
@@ -425,6 +460,10 @@ def forward_verdict(
     else:
         status = "INCONCLUSIVE"
         reasons = [d for c, ok, d in criteria[6:] if not ok]
-    if state != "ACTIVE" and status == "INCONCLUSIVE":
+    if state != "ACTIVE" and status == "PASS":
+        # optional stopping: a test stopped (or halted) while it looked good can't PASS
+        status = "INCONCLUSIVE"
+        reasons = [f"test is {state}: only a test that is still running can PASS"]
+    elif state != "ACTIVE" and status == "INCONCLUSIVE":
         reasons.append(f"test is {state}")
     return {"status": status, "reasons": reasons, "criteria": table}

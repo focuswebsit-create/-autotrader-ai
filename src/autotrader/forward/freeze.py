@@ -29,6 +29,7 @@ FORWARD_SCHEMA = "forward-test/1"
 
 #: Files whose behaviour defines decisions and simulated fills.
 _PKG = Path(__file__).resolve().parents[1]
+#: Everything that turns frozen config + data into decisions, fills and the verdict.
 CODE_FILES: tuple[str, ...] = (
     "strategy/indicators.py",
     "strategy/base.py",
@@ -36,6 +37,16 @@ CODE_FILES: tuple[str, ...] = (
     "strategy/sessions.py",
     "backtest/engine.py",
     "backtest/costs.py",
+    "backtest/validation.py",
+    "backtest/metrics.py",
+    "backtest/store.py",
+    "market/models.py",
+    "market/candles.py",
+    "db/market_data.py",
+    "ingest/funding.py",
+    "forward/freeze.py",
+    "forward/recorder.py",
+    "forward/evaluate.py",
 )
 
 

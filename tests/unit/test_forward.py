@@ -40,6 +40,7 @@ from tests.unit.bt_helpers import STEP, T0, D, Scripted, flat, run
 COIN = "xyz:CL"
 #: "today" inside the recorded data: ~2026-10-10, leaving ~25 days of "future"
 FREEZE_AT = datetime(2026, 10, 10, 9, 7, tzinfo=UTC)
+H10 = datetime(2026, 10, 10, 10, tzinfo=UTC)  # first hour fully inside the test
 
 
 def _gz(name: str) -> Any:
@@ -470,3 +471,123 @@ def test_worker_records_for_active_tests_and_survives_funding_errors(
             select(func.count()).select_from(ForwardDecision).where(ForwardDecision.test_id == a)
         )
     assert n == 11
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def test_on_the_hour_bar_waits_for_its_1h_bar(db: sessionmaker[Session], tmp_path: Path) -> None:
+    """Review H1: the collector commits 30m and 1h separately. A decision on an hourly
+    close must not be made before the 1h bar closing at the same instant is stored."""
+    from autotrader.db.models import CandleRow
+
+    sessions = _fresh_copy(db, tmp_path)
+    with sessions.begin() as s:
+        tid = rec.create_test(s, COIN, "breakout_volume", now=FREEZE_AT, code_version="t").id
+        # the 1h bar 10:00-11:00 is "not yet closed" (still forming) at 11:00:20
+        h = s.scalars(select(CandleRow).where(
+            CandleRow.interval == "1h", CandleRow.open_time == H10
+        )).one()  # fmt: skip
+        h.is_closed = False
+    at = datetime(2026, 10, 10, 11, 0, 20, tzinfo=UTC)
+    with sessions.begin() as s:
+        res = rec.tick(s, s.get(ForwardTest, tid), now=at)
+    # 09:30 and 10:00 bars recorded; 10:30 (closes 11:00) waits for its 1h bar
+    assert res.recorded == 2 and any("waiting for the 1h bar" in n for n in res.notes)
+    with sessions.begin() as s:
+        s.scalars(select(CandleRow).where(
+            CandleRow.interval == "1h", CandleRow.open_time == H10
+        )).one().is_closed = True  # fmt: skip
+    with sessions.begin() as s:
+        assert rec.tick(s, s.get(ForwardTest, tid), now=at + timedelta(seconds=30)).recorded == 1
+    with sessions() as s:
+        r = ev.evaluate(s, s.get(ForwardTest, tid), now=at + timedelta(minutes=1))
+    assert r["parity"]["mismatches"] == 0
+
+
+def test_missing_1h_bar_is_waited_for_then_recorded_as_gap(
+    db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    from autotrader.db.models import CandleRow
+
+    sessions = _fresh_copy(db, tmp_path)
+    with sessions.begin() as s:
+        tid = rec.create_test(s, COIN, "ema_rsi", now=FREEZE_AT, code_version="t").id
+        s.query(CandleRow).filter(
+            CandleRow.interval == "1h", CandleRow.open_time >= H10
+        ).delete()  # fmt: skip
+    with sessions.begin() as s:
+        r1 = rec.tick(s, s.get(ForwardTest, tid), now=datetime(2026, 10, 10, 11, 5, tzinfo=UTC))
+    assert r1.recorded == 2
+    with sessions.begin() as s:
+        r2 = rec.tick(s, s.get(ForwardTest, tid), now=datetime(2026, 10, 10, 11, 20, tzinfo=UTC))
+        gaps = [
+            e.detail
+            for e in s.scalars(select(ForwardEvent).where(ForwardEvent.event == "DATA_GAP"))
+        ]
+    assert r2.recorded == 1 and any("h1_missing_at" in g for g in gaps)
+
+
+def test_revised_input_data_is_detected(db: sessionmaker[Session], tmp_path: Path) -> None:
+    """Review M5: a candle corrected after a decision used it invalidates the result."""
+    from autotrader.db.models import CandleRow
+
+    sessions = _fresh_copy(db, tmp_path)
+    with sessions.begin() as s:
+        tid = rec.create_test(s, COIN, "ema_rsi", now=FREEZE_AT, code_version="t").id
+    _run_live(sessions, tid, FREEZE_AT + timedelta(hours=4), timedelta(hours=4))
+    with sessions.begin() as s:
+        bar = s.scalars(select(CandleRow).where(
+            CandleRow.interval == "30m", CandleRow.open_time == H10
+        )).one()  # fmt: skip
+        bar.volume = bar.volume + 1  # SQLite: no immutability trigger, simulate a correction
+    with sessions() as s:
+        r = ev.evaluate(s, s.get(ForwardTest, tid), now=FREEZE_AT + timedelta(hours=4))
+    assert any(m.get("issue") == "INPUT_DATA_CHANGED" for m in r["parity"]["examples"])
+    assert r["verdict"]["status"] == "INVALID"
+
+
+def test_observed_days_count_recorded_bars_not_wall_clock(live: Any) -> None:
+    """Review M2: waiting (collector down / test stopped) doesn't add observation days."""
+    sessions, tid, until, _ = live
+    with sessions() as s:
+        r = ev.evaluate(s, s.get(ForwardTest, tid), now=until + timedelta(days=40))
+    assert r["progress"]["observed_days"] < 20.01
+    assert (
+        next(c for c in r["verdict"]["criteria"] if c["criterion"] == "min_days")["passed"] is False
+    )
+
+
+def test_stopped_test_can_never_pass() -> None:
+    """Review M3: no optional stopping - a stopped/halted test can't PASS."""
+    base: dict[str, Any] = {"th": Thresholds(), "code_ok": True, "parity_ok": True,
+                            "violations": 0}  # fmt: skip
+    ok = {"n": 40, "observed_days": 45, "trade_days": 20, "ci": [0.1, 0.6], "stress_net": "5"}
+    assert ev.forward_verdict(state="ACTIVE", **ok, **base)["status"] == "PASS"
+    stopped = ev.forward_verdict(state="STOPPED", **ok, **base)
+    assert stopped["status"] == "INCONCLUSIVE" and "still running" in stopped["reasons"][0]
+
+
+def test_signal_frequency_uses_backtest_definition(live: Any) -> None:
+    """Review M4: forward signals/day counts signals evaluated while flat, like the backtest."""
+    sessions, tid, until, _ = live
+    with sessions() as s:
+        r = ev.evaluate(s, s.get(ForwardTest, tid), now=until)
+    engine_signals = sum(1 for e in r["engine_signals"])
+    recorded = r["progress"]["signals"]
+    assert engine_signals <= recorded
+    days = r["progress"]["observed_days"]
+    assert (
+        round(engine_signals / days, 4)
+        == ev._compare(
+            {"summary": {}, "run_id": 1}, r["stats"], r["summary"], days, engine_signals
+        )["metrics"][4]["forward"]
+    )
+
+
+def test_code_hash_covers_evaluation_code() -> None:
+    from autotrader.forward.freeze import CODE_FILES
+
+    for f in ("forward/evaluate.py", "backtest/validation.py", "forward/freeze.py",
+              "market/models.py", "db/market_data.py"):  # fmt: skip
+        assert f in CODE_FILES

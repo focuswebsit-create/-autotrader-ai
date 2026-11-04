@@ -663,3 +663,50 @@ def test_forward_journal_is_immutable_and_starts_after_freeze(migrated: str) -> 
     # a test can't start in the past relative to its creation
     with pytest.raises(DBAPIError), engine.begin() as c:
         _forward_test_row(c, starts="2026-11-04T20:00:00Z")
+
+
+def test_forward_and_backtest_tables_cannot_be_truncated(migrated: str) -> None:
+    engine = create_engine(migrated)
+    for table in ("forward_tests", "forward_decisions", "forward_events", "funding_rates",
+                  "backtest_runs", "backtest_trades"):  # fmt: skip
+        with pytest.raises(DBAPIError), engine.begin() as c:
+            c.execute(text(f"TRUNCATE {table} CASCADE"))
+
+
+def test_concurrent_freeze_creates_one_active_test(migrated: str) -> None:
+    """Review M3: two simultaneous freezes for one strategy -> exactly one active test."""
+    import threading
+    from datetime import UTC, datetime
+
+    from autotrader.forward.recorder import active_tests, create_test
+
+    engine = create_engine(migrated)
+    with engine.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO candles (coin, interval, open_time, close_time, open, high, low, "
+                "close, volume, is_closed, source, first_seen_at, updated_at) VALUES "
+                "('xyz:CL','30m','2026-07-23T04:00:00Z','2026-07-23T04:30:00Z',90,91,89,90,1,"
+                "true,'rest',now(),now())"
+            )
+        )
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    errors: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def freeze() -> None:
+        barrier.wait()
+        try:
+            with sessions.begin() as s:
+                create_test(s, "xyz:CL", "ema_rsi", now=datetime.now(UTC), code_version="t")
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    threads = [threading.Thread(target=freeze) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    with sessions() as s:
+        assert len(active_tests(s, "xyz:CL")) == 1
+    assert len(errors) == 1 and "already exists" in errors[0]

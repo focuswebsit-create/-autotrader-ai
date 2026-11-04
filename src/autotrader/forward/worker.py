@@ -23,21 +23,27 @@ from autotrader.ingest.funding import sync_funding
 log = logging.getLogger("autotrader.forward.worker")
 
 TICK_EVERY_S = 30
-FUNDING_EVERY = timedelta(minutes=60)
+#: frequent, so recorded funding for recent hours lands soon (results depend on it)
+FUNDING_EVERY = timedelta(minutes=10)
 
 
 def tick_all(sessions: sessionmaker[Session], coin: str, now: datetime) -> list[TickResult]:
     out: list[TickResult] = []
     with sessions() as s:
         ids = [t.id for t in active_tests(s, coin)]
+    from autotrader.db.models import ForwardTest
+
     for test_id in ids:
         # one transaction per test: a failure in one never blocks the others
-        with sessions.begin() as s:
-            from autotrader.db.models import ForwardTest
-
-            test = s.get(ForwardTest, test_id)
-            if test is not None:
-                out.append(tick(s, test, now=now))
+        try:
+            with sessions.begin() as s:
+                test = s.get(ForwardTest, test_id)
+                if test is not None:
+                    out.append(tick(s, test, now=now))
+        except Exception:
+            # e.g. a second worker already recorded this bar (unique constraint): the
+            # transaction is rolled back and the next cycle simply continues
+            log.exception("forward tick failed", extra={"test_id": test_id})
     return out
 
 

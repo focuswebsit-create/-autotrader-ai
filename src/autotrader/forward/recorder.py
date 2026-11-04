@@ -62,6 +62,11 @@ DISCOVERY_MAX_AGE = timedelta(minutes=15)
 #: bars hashed into ``input_digest``
 DIGEST_BARS = 60
 TERMINAL_EVENTS = ("STOPPED", "INTEGRITY_HALT")
+FREEZE_LOCK_KEY = 0x46574446  # "FWDF"
+#: how long to wait for the 1h bar that closes with a 30m bar before deciding anyway
+H1_WAIT = timedelta(minutes=15)
+#: hash of the code this process actually loaded (detects edits made under a running worker)
+_LOADED_CODE_HASH = strategy_code_hash()
 
 
 def _utc(t: datetime) -> datetime:
@@ -156,6 +161,12 @@ def create_test(
     Refuses if an ACTIVE test for this strategy exists (one test at a time, so
     results can't be cherry-picked across parallel variants).
     """
+    if session.get_bind().dialect.name == "postgresql":
+        # serialise concurrent freezes: the one-active-test rule can't be a DB constraint
+        # (activity is derived from the event log), so take a transaction-level lock
+        from sqlalchemy import text
+
+        session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": FREEZE_LOCK_KEY})
     for t in active_tests(session, coin):
         if t.strategy_id == strategy_id:
             raise ValueError(f"an active forward test (#{t.id}) already exists for {strategy_id}")
@@ -266,12 +277,17 @@ def tick(session: Session, test: ForwardTest, *, now: datetime) -> TickResult:
     if res.state != "ACTIVE":
         return res
     code_hash = strategy_code_hash()
-    if code_hash != test.code_hash:
+    if code_hash != test.code_hash or test.code_hash != _LOADED_CODE_HASH:
         add_event(
             session,
             test.id,
             "INTEGRITY_HALT",
-            {"reason": "CODE_CHANGED", "frozen": test.code_hash, "current": code_hash},
+            {
+                "reason": "CODE_CHANGED",
+                "frozen": test.code_hash,
+                "on_disk": code_hash,
+                "loaded": _LOADED_CODE_HASH,
+            },
             now,
         )
         res.state = "INTEGRITY_HALT"
@@ -294,6 +310,24 @@ def tick(session: Session, test: ForwardTest, *, now: datetime) -> TickResult:
         for i, b in enumerate(m30)
         if b.open_time >= starts_at and (last_done is None or b.open_time > last_done)
     ]
+    # A 30m bar closing on the hour needs the 1h bar that closes at the same instant;
+    # the collector commits the two intervals separately. Deciding before the 1h bar
+    # is stored would differ from any later replay, so wait for it (up to H1_WAIT; after
+    # that the 1h bar is treated as genuinely missing and the gap is recorded).
+    h1_last = h1[-1].close_time if h1 else None
+    ready: list[int] = []
+    for i in todo:
+        t = m30[i].close_time
+        need = t.replace(minute=0, second=0, microsecond=0)
+        if h1_last is not None and h1_last >= need:
+            ready.append(i)
+        elif now - t >= H1_WAIT:
+            _event_once(session, test.id, "DATA_GAP", {"h1_missing_at": need.isoformat()}, now)
+            ready.append(i)
+        else:
+            res.notes.append(f"waiting for the 1h bar closing {need.isoformat()}")
+            break
+    todo = ready
     newest = m30[-1].close_time
     res.last_bar_close = newest
     if now - newest > STALE_AFTER and now >= starts_at + STALE_AFTER:

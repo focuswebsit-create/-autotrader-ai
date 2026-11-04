@@ -25,6 +25,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 NEW_TABLES = ("forward_tests", "forward_decisions", "forward_events")
+BACKTEST_TABLES = ("funding_rates", "backtest_runs", "backtest_trades")
 ROLES = ("autotrader_reader", "autotrader_writer")
 PK = sa.BigInteger().with_variant(sa.Integer(), "sqlite")
 PRICE = sa.Numeric(precision=38, scale=18)
@@ -140,6 +141,13 @@ def upgrade() -> None:
             "FOR EACH ROW EXECUTE FUNCTION forbid_backtest_mutation();"
         )
 
+    # Row triggers don't fire on TRUNCATE: block it too (forward + Phase 2 backtest tables).
+    for table in (*NEW_TABLES, *BACKTEST_TABLES):
+        op.execute(
+            f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
+            "FOR EACH STATEMENT EXECUTE FUNCTION forbid_truncate();"
+        )
+
     tables = ", ".join(NEW_TABLES)
     for role in ROLES:
         _grant(f"GRANT SELECT ON {tables} TO {role}", role)
@@ -154,6 +162,8 @@ def downgrade() -> None:
     tables = ", ".join(NEW_TABLES)
     for role in ROLES:
         _grant(f"REVOKE ALL ON {tables} FROM {role}", role)
+    for table in (*NEW_TABLES, *BACKTEST_TABLES):
+        op.execute(f"DROP TRIGGER IF EXISTS trg_{table}_no_truncate ON {table}")
     for table in NEW_TABLES:
         op.execute(f"DROP TRIGGER IF EXISTS trg_{table}_immutable ON {table}")
     op.execute("DROP TRIGGER IF EXISTS trg_forward_decision_period ON forward_decisions")
