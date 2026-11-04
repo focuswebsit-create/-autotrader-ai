@@ -473,3 +473,291 @@ class ForwardEvent(Base):
         ),
         Index("ix_forward_events_test", "test_id", "id"),
     )
+
+
+# --------------------------------------------------------------------------- Phase 3
+# Autonomous PAPER trading. Every table is append-only (UPDATE/DELETE/TRUNCATE rejected
+# by triggers) except auth_sessions.revoked_at. Nothing here can reach an exchange.
+
+PAPER_BOT_STATES = ("STOPPED", "STARTING", "RUNNING", "PAUSED", "DEGRADED", "HALTED")
+
+
+class PaperAccount(Base):
+    """A virtual account with its frozen strategy, risk and execution configuration."""
+
+    __tablename__ = "paper_accounts"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    coin: Mapped[str] = mapped_column(String(64), nullable=False)
+    initial_equity: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PaperCommand(Base):
+    """Owner commands (from the authenticated Control API) for the paper worker."""
+
+    __tablename__ = "paper_commands"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    command: Mapped[str] = mapped_column(String(32), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    #: client-supplied key: a double click / retried request creates one command only
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "command IN ('START','STOP','PAUSE','RESUME','KILL','CLOSE_AND_STOP','RESET_HALT')",
+            name="ck_paper_commands_command",
+        ),
+        Index("ix_paper_commands_account", "account_id", "id"),
+    )
+
+
+class PaperBotEvent(Base):
+    """Bot state machine transitions; the current state is the latest row."""
+
+    __tablename__ = "paper_bot_events"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    command_id: Mapped[int | None] = mapped_column(PK, ForeignKey("paper_commands.id"))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('STOPPED','STARTING','RUNNING','PAUSED','DEGRADED','HALTED')",
+            name="ck_paper_bot_events_state",
+        ),
+        Index("ix_paper_bot_events_account", "account_id", "id"),
+    )
+
+
+class PaperDecision(Base):
+    """One strategy decision per closed 30m bar while the bot runs (append-only)."""
+
+    __tablename__ = "paper_decisions"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    bar_open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bar_close_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    side: Mapped[str | None] = mapped_column(String(8))
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: what the engine did with it: ORDER / BLOCKED / NO_SIGNAL / IN_POSITION
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    block_reason: Mapped[str | None] = mapped_column(String(64))
+    atr: Mapped[Decimal | None] = mapped_column(Price)
+    rationale: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    market: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "bar_open_time", name="uq_paper_decisions_bar"),
+        CheckConstraint("side IS NULL OR side IN ('LONG','SHORT')", name="ck_pd_side"),
+        CheckConstraint("evaluated_at >= bar_close_time", name="ck_pd_no_lookahead"),
+        CheckConstraint(
+            "outcome IN ('ORDER','BLOCKED','NO_SIGNAL','IN_POSITION')", name="ck_pd_outcome"
+        ),
+    )
+
+
+class PaperOrder(Base):
+    """A simulated order, stored once in its final state together with its fill."""
+
+    __tablename__ = "paper_orders"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    #: deterministic id (decision / position + purpose): a retry can't fill twice
+    client_order_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    requested_size: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    filled_size: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    avg_price: Mapped[Decimal | None] = mapped_column(Price)
+    reference_price: Mapped[Decimal | None] = mapped_column(Price)
+    fee: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    reject_reason: Mapped[str | None] = mapped_column(String(64))
+    book: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('ENTRY','EXIT_STOP','EXIT_TARGET','EXIT_MANUAL','EXIT_KILL')",
+            name="ck_po_purpose",
+        ),
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_po_side"),
+        CheckConstraint("status IN ('FILLED','PARTIALLY_FILLED','REJECTED')", name="ck_po_status"),
+        CheckConstraint("filled_size >= 0 AND filled_size <= requested_size", name="ck_po_size"),
+        Index("ix_paper_orders_account", "account_id", "id"),
+    )
+
+
+class PaperPosition(Base):
+    """An opened virtual position (append-only; closing writes paper_position_closes)."""
+
+    __tablename__ = "paper_positions"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    decision_id: Mapped[int] = mapped_column(PK, ForeignKey("paper_decisions.id"), nullable=False)
+    entry_order_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_orders.id"), nullable=False, unique=True
+    )
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    size: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    stop: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    target: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    atr: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    risk_budget: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    planned_loss: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("side IN ('LONG','SHORT')", name="ck_pp_side"),
+        CheckConstraint("size > 0 AND entry_price > 0", name="ck_pp_positive"),
+        Index("ix_paper_positions_account", "account_id", "id"),
+    )
+
+
+class PaperPositionClose(Base):
+    __tablename__ = "paper_position_closes"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    position_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_positions.id"), nullable=False, unique=True
+    )
+    exit_order_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_orders.id"), nullable=False, unique=True
+    )
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    exit_price: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    gross_pnl: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    fees: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    funding: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    net_pnl: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PaperLedger(Base):
+    """USDC movements of a virtual account. Cash = sum(amount). Append-only."""
+
+    __tablename__ = "paper_ledger"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    #: what produced the entry (e.g. "order:12", "funding:7:2026-11-04T13:00") - unique
+    ref: Mapped[str] = mapped_column(String(96), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "kind", "ref", name="uq_paper_ledger_ref"),
+        CheckConstraint(
+            "kind IN ('DEPOSIT','FEE','REALIZED_PNL','FUNDING')", name="ck_paper_ledger_kind"
+        ),
+        Index("ix_paper_ledger_account", "account_id", "id"),
+    )
+
+
+class PaperRiskEvent(Base):
+    """Every blocked entry, halt and risk-limit trigger, with its reason."""
+
+    __tablename__ = "paper_risk_events"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_paper_risk_events_account", "account_id", "id"),)
+
+
+class PaperEquitySnapshot(Base):
+    """Equity marked at the executable price, every few minutes (curve, daily P&L)."""
+
+    __tablename__ = "paper_equity_snapshots"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("paper_accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cash: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    unrealized: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    equity: Mapped[Decimal] = mapped_column(Price, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "at", name="uq_paper_equity_at"),
+        Index("ix_paper_equity_account", "account_id", "at"),
+    )
+
+
+class AuthUser(Base):
+    __tablename__ = "auth_users"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    #: scrypt$n$r$p$salt$hash (stdlib hashlib.scrypt)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (CheckConstraint("role IN ('ADMIN','VIEWER')", name="ck_auth_users_role"),)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    #: sha256 of the session token (the token itself is never stored)
+    token_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    csrf_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(PK, ForeignKey("auth_users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    client_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class AuthLoginAttempt(Base):
+    __tablename__ = "auth_login_attempts"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_auth_login_attempts", "username", "at"),)

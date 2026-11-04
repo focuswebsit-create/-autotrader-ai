@@ -342,6 +342,78 @@ def _forward(args: argparse.Namespace) -> int:
     return 0
 
 
+def _paper(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
+    from autotrader.paper import engine, report
+    from autotrader.paper.config import PaperConfig
+    from autotrader.paper.worker import run_forever
+
+    check_environment()
+    assert_paper_mode()
+    env = _require_db()
+    if env is None:
+        return 3
+    settings, sessions = env
+    coin = settings.market_coin
+    now = datetime.now(UTC)
+    if args.paper_cmd == "init":
+        with sessions.begin() as s:
+            if report.get_account(s, coin, args.name) is not None:
+                print(json.dumps({"ok": False, "code": "ACCOUNT_EXISTS"}), file=sys.stderr)
+                return 2
+            acc = engine.create_account(
+                s, name=args.name, coin=coin, now=now, config=PaperConfig(strategy_id=args.strategy)
+            )
+            out = {
+                "ok": True,
+                "account": acc.name,
+                "strategy": acc.strategy_id,
+                "initial_equity": str(acc.initial_equity),
+                "state": "STOPPED",
+            }
+        print(json.dumps(out, indent=2))
+        return 0
+    if args.paper_cmd == "run":
+        from sqlalchemy import create_engine
+
+        assert settings.database_url is not None
+        lock_conn = create_engine(settings.database_url).connect()
+        with InfoClient() as client:
+            return run_forever(sessions, lock_conn, coin, client)
+    with sessions() as s:
+        found = report.get_account(s, coin, args.name)
+        if found is None:
+            print(json.dumps({"ok": False, "code": "ACCOUNT_NOT_FOUND"}), file=sys.stderr)
+            return 2
+        print(json.dumps(report.summary(s, found, now), indent=2, default=str, ensure_ascii=False))
+    return 0
+
+
+def _user(args: argparse.Namespace) -> int:
+    import getpass
+    from datetime import UTC, datetime
+
+    from autotrader.control.auth import create_user
+
+    env = _require_db()
+    if env is None:
+        return 3
+    _settings, sessions = env
+    password = getpass.getpass("Password (min 12 chars): ")
+    if password != getpass.getpass("Repeat password: "):
+        print(json.dumps({"ok": False, "code": "PASSWORDS_DIFFER"}), file=sys.stderr)
+        return 2
+    try:
+        with sessions.begin() as s:
+            u = create_user(s, args.username, password, args.role, datetime.now(UTC))
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "code": "INVALID", "message": str(exc)}), file=sys.stderr)
+        return 2
+    print(json.dumps({"ok": True, "user": u.username, "role": u.role}))
+    return 0
+
+
 def _collect(_: argparse.Namespace) -> int:
     from autotrader.collector_main import main as collector_main
 
@@ -396,6 +468,21 @@ def main(argv: list[str] | None = None) -> int:
     fst.add_argument("--id", type=int, required=True)
     fst.add_argument("--reason", required=True)
     fw.set_defaults(func=_forward)
+    pp = sub.add_parser("paper", help="Phase 3 autonomous PAPER trading (virtual money)")
+    pps = pp.add_subparsers(dest="paper_cmd", required=True)
+    pi = pps.add_parser("init", help="create a virtual account (1,000 USDC, bot STOPPED)")
+    pi.add_argument("--name", default="demo")
+    pi.add_argument("--strategy", default="breakout_volume", choices=list(STRATEGIES))
+    pps.add_parser("run", help="run the paper-trader worker")
+    pst = pps.add_parser("status", help="account summary from the ledger (JSON)")
+    pst.add_argument("--name", default="demo")
+    pp.set_defaults(func=_paper)
+    us = sub.add_parser("user", help="dashboard users (Control API login)")
+    uss = us.add_subparsers(dest="user_cmd", required=True)
+    uc = uss.add_parser("create", help="create a user (password asked interactively)")
+    uc.add_argument("--username", required=True)
+    uc.add_argument("--role", default="ADMIN", choices=["ADMIN", "VIEWER"])
+    us.set_defaults(func=_user)
     co = sub.add_parser("collect", help="run the live market-data collector")
     co.set_defaults(func=_collect)
     args = parser.parse_args(argv)
