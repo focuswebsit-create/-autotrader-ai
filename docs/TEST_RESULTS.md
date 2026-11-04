@@ -147,3 +147,6 @@ New and extended tests:
 - Blocked signals are categorised.
 - `market_hours` shows every bar traded.
 - The fee scenarios are present in every report.
+
+### CI fix
+The GitHub Actions `backend` job failed on `ddeb798` (run #14). `test_backtest_api_without_db` used `Settings()`, which reads `AUTOTRADER_DATABASE_URL`. CI exports that variable, so the "no DB" test reached a database whose tables an integration test had just dropped. The test is now explicit (`Settings(database_url=None)`). Reproduced locally with the CI environment before the fix (1 failed) and verified after it: 405 passed both with and without `AUTOTRADER_DATABASE_URL`.

@@ -133,5 +133,6 @@ def test_backtest_api_lists_and_returns_stored_runs(sqlite_sessions: sessionmake
 
 
 def test_backtest_api_without_db() -> None:
-    c = TestClient(create_app(Settings(), None, clock=Clock()))
+    # explicit: CI exports AUTOTRADER_DATABASE_URL, which Settings() would pick up
+    c = TestClient(create_app(Settings(database_url=None), None, clock=Clock()))
     assert c.get("/api/backtest/runs").json()["detail"] == "DATABASE_NOT_CONFIGURED"
