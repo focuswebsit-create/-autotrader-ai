@@ -7,8 +7,10 @@ in ``_test`` (review finding M4), so they can never wipe a dev/prod database.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -436,3 +438,110 @@ def test_cli_backfill_refuses_while_collector_holds_lock(
     finally:
         release_collector_lock(holder)
         get_settings.cache_clear()
+
+
+# ------------------------------------------------------------ controlled correction (0005)
+
+CLOSED_BAR = CANDLE_SQL.format(o=90, h=91, l=89, c=90.5)
+
+
+def test_correction_requires_ticket_and_non_service_role(
+    roles: dict[str, Any], migrated: str
+) -> None:
+    owner = create_engine(migrated)
+    with owner.begin() as c:
+        c.execute(text(CLOSED_BAR))
+    # Owner without a ticket: still immutable.
+    with pytest.raises(DBAPIError, match="immutable"), owner.begin() as c:
+        c.execute(text("UPDATE candles SET close = 90.4"))
+    # The collector's role cannot use the path even if it sets a ticket.
+    with pytest.raises(DBAPIError, match="immutable"), roles["worker"].begin() as c:
+        c.execute(text("SELECT set_config('autotrader.correction_ticket', 'X-1', true)"))
+        c.execute(text("UPDATE candles SET close = 90.4"))
+    # Owner with a ticket: allowed, and audited by the trigger itself.
+    with owner.begin() as c:
+        c.execute(text("SELECT set_config('autotrader.correction_ticket', 'QA-42', true)"))
+        c.execute(text("UPDATE candles SET close = 90.4"))
+    with owner.connect() as c:
+        row = c.execute(
+            text("SELECT actor, action, before->>'close', after->>'close' FROM audit_log")
+        ).one()
+        assert row[1] == "CORRECT_CLOSED_CANDLE ticket=QA-42"
+        assert Decimal(row[2]) == Decimal("90.5") and Decimal(row[3]) == Decimal("90.4")
+    # The ticket is transaction-local: the next transaction is protected again.
+    with pytest.raises(DBAPIError, match="immutable"), owner.begin() as c:
+        c.execute(text("UPDATE candles SET close = 90.3"))
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE candles SET is_closed = false",
+        "UPDATE candles SET open_time = open_time + interval '30 minutes', "
+        "close_time = close_time + interval '30 minutes'",
+        "UPDATE candles SET interval = '1h'",
+    ],
+)
+def test_correction_cannot_change_identity_or_reopen(migrated: str, sql: str) -> None:
+    owner = create_engine(migrated)
+    with owner.begin() as c:
+        c.execute(text(CLOSED_BAR))
+    with pytest.raises(DBAPIError, match="identity or reopen"), owner.begin() as c:
+        c.execute(text("SELECT set_config('autotrader.correction_ticket', 'QA-1', true)"))
+        c.execute(text(sql))
+
+
+def test_repair_flow_backup_audit_and_idempotent(
+    migrated: str, snapshot_30m: Any, tmp_path: Any
+) -> None:
+    from autotrader.ingest.repair import apply_corrections, find_differences
+    from autotrader.ingest.rest import backfill
+    from autotrader.market.candles import Interval
+    from tests.conftest import Clock
+
+    class Info:
+        def info(self, payload: dict[str, Any]) -> Any:
+            return snapshot_30m
+
+    sessions = sessionmaker(bind=create_engine(migrated), expire_on_commit=False)
+    assert backfill(sessions, Info(), coin="xyz:CL", interval=Interval.M30, clock=Clock()).ok
+    # Simulate a bar frozen from partial data (e.g. the pre-H1 bug).
+    target = snapshot_30m[150]
+    with sessions.begin() as s:
+        s.execute(text("SELECT set_config('autotrader.correction_ticket', 'SIMULATE', true)"))
+        s.execute(
+            text(
+                "UPDATE candles SET volume = volume / 2 WHERE open_time = to_timestamp(:t / 1000.0)"
+            ),
+            {"t": target["t"]},
+        )
+    with sessions() as s:
+        diffs, exchange, compared = find_differences(s, Info(), "xyz:CL", Interval.M30)
+    assert compared == 200 and len(diffs) == 1  # dry run only reports
+    assert diffs[0].exchange["volume"] == target["v"]
+
+    backup = apply_corrections(
+        sessions, "xyz:CL", Interval.M30, diffs, exchange, ticket="QA-7", backup_dir=tmp_path
+    )
+    saved = json.loads(backup.read_text())
+    assert saved["ticket"] == "QA-7" and saved["rows"][0]["stored"]["volume"] != target["v"]
+    with sessions() as s:
+        assert find_differences(s, Info(), "xyz:CL", Interval.M30)[0] == []  # fixed, idempotent
+        actions = s.execute(text("SELECT action FROM audit_log ORDER BY id")).scalars().all()
+        assert actions == [
+            "CORRECT_CLOSED_CANDLE ticket=SIMULATE",
+            "CORRECT_CLOSED_CANDLE ticket=QA-7",
+        ]
+        issue = s.execute(
+            text("SELECT detail FROM data_quality_issues WHERE issue_type='REVISED_CLOSED_CANDLE'")
+        ).scalar_one()
+        assert "QA-7" in issue
+
+
+def test_apply_requires_ticket(migrated: str, tmp_path: Any) -> None:
+    from autotrader.ingest.repair import apply_corrections
+    from autotrader.market.candles import Interval
+
+    sessions = sessionmaker(bind=create_engine(migrated))
+    with pytest.raises(ValueError, match="ticket"):
+        apply_corrections(sessions, "xyz:CL", Interval.M30, [], {}, ticket=" ", backup_dir=tmp_path)

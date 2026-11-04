@@ -142,6 +142,60 @@ def _data_report(_: argparse.Namespace) -> int:
     return 0
 
 
+def _repair(args: argparse.Namespace) -> int:
+    """Dry-run by default. --apply needs --ticket and --backup-dir (see ingest/repair.py)."""
+    from pathlib import Path
+
+    from autotrader.ingest.repair import apply_corrections, find_differences
+
+    check_environment()
+    assert_paper_mode()
+    env = _require_db()
+    if env is None:
+        return 3
+    settings, sessions = env
+    assert settings.database_url is not None
+    if args.apply and (not args.ticket or not args.backup_dir):
+        print(json.dumps({"ok": False, "code": "TICKET_AND_BACKUP_REQUIRED"}), file=sys.stderr)
+        return 2
+    # A dry run only reads; corrections take the single-writer lock.
+    lock_conn = open_lock_connection(settings.database_url) if args.apply else None
+    try:
+        if lock_conn is not None and not try_collector_lock(lock_conn):
+            print(json.dumps({"ok": False, "code": "COLLECTOR_RUNNING"}), file=sys.stderr)
+            return 5
+        report: list[dict[str, object]] = []
+        with InfoClient() as client:
+            for iv in [Interval(args.interval)] if args.interval else list(Interval):
+                with sessions() as s:
+                    diffs, exchange, compared = find_differences(
+                        s, client, settings.market_coin, iv
+                    )
+                entry: dict[str, object] = {
+                    "interval": iv.value,
+                    "compared": compared,
+                    "differences": [d.__dict__ for d in diffs],
+                }
+                if args.apply and diffs:
+                    backup = apply_corrections(
+                        sessions,
+                        settings.market_coin,
+                        iv,
+                        diffs,
+                        exchange,
+                        ticket=args.ticket,
+                        backup_dir=Path(args.backup_dir),
+                    )
+                    entry["corrected"] = len(diffs)
+                    entry["backup"] = str(backup)
+                report.append(entry)
+        print(json.dumps({"apply": bool(args.apply), "results": report}, indent=2))
+        return 0
+    finally:
+        if lock_conn is not None:
+            release_collector_lock(lock_conn)
+
+
 def _collect(_: argparse.Namespace) -> int:
     from autotrader.collector_main import main as collector_main
 
@@ -161,6 +215,15 @@ def main(argv: list[str] | None = None) -> int:
     bf.set_defaults(func=_backfill)
     dr = sub.add_parser("data-report", help="coverage, gaps and data-quality issues (JSON)")
     dr.set_defaults(func=_data_report)
+    rp = sub.add_parser(
+        "repair-candles",
+        help="compare closed candles with the exchange; correct only with --apply (audited)",
+    )
+    rp.add_argument("--interval", choices=[i.value for i in Interval])
+    rp.add_argument("--apply", action="store_true", help="apply corrections (default: dry-run)")
+    rp.add_argument("--ticket", help="correction ticket id (required with --apply)")
+    rp.add_argument("--backup-dir", help="directory for the pre-change backup (required)")
+    rp.set_defaults(func=_repair)
     co = sub.add_parser("collect", help="run the live market-data collector")
     co.set_defaults(func=_collect)
     args = parser.parse_args(argv)

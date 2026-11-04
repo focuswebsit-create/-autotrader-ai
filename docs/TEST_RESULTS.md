@@ -1,6 +1,13 @@
 # Test Results
 
-## Phase 1 after the final independent review (2026-11-04, latest)
+## Phase 1 after the data-integrity audit (2026-11-04, latest)
+```
+ruff / format / mypy --strict  -> clean (44 files)
+pytest (unit + 28 PostgreSQL)  -> 308 passed, 5 consecutive full runs green
+data-integrity audit           -> 19,973 closed bars vs mainnet, 0 differences
+```
+
+## Phase 1 after the final independent review (2026-11-04)
 ```
 ruff / format / mypy --strict  -> clean (42 files)
 pytest (unit + PostgreSQL)     -> 301 passed, 12 consecutive full runs green

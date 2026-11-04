@@ -123,3 +123,12 @@ def test_no_dynamic_imports_or_string_built_endpoints() -> None:
     ]
     offenders = [str(p) for p in _py_files() if any(pat.search(p.read_text()) for pat in patterns)]
     assert offenders == []
+
+
+def test_migration_revision_ids_fit_alembic_version_column() -> None:
+    """alembic_version.version_num is VARCHAR(32): longer ids fail only at upgrade time."""
+    versions = SRC / "db" / "migrations" / "versions"
+    for path in versions.glob("*.py"):
+        m = re.search(r'^revision: str = "([^"]+)"', path.read_text(), re.MULTILINE)
+        assert m, path
+        assert len(m.group(1)) <= 32, f"{path.name}: revision id too long ({len(m.group(1))})"

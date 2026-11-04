@@ -115,3 +115,9 @@ The database keeps all bars it has ever collected, so coverage grows over time w
 - Candle writes hold `_write_lock` only around DB transactions; whole REST syncs are serialised by `_sync_lock`, and network I/O never holds the write lock (M2).
 - On shutdown the collector drains in-flight syncs and refuses new writes **before** reporting STOPPED and before the single-writer lock is released (M4). `autotrader backfill` takes the same lock.
 - Closed candles are immutable in the database itself (migration 0004 trigger).
+
+## ADR-021 — Controlled, audited correction of closed candles (2026-11-04)
+- Closed candles stay immutable by default (migration 0004).
+- Migration 0005 adds a single correction path, usable only by a non-service DB user with a transaction-local `autotrader.correction_ticket`. It may not change a bar's identity or reopen it, and the trigger writes before/after into the append-only `audit_log`.
+- Corrections are made only with `autotrader repair-candles --apply --ticket … --backup-dir …`: a JSON backup is written before any change, everything happens in one transaction under the writer lock, and `REVISED_CLOSED_CANDLE` is recorded.
+- Nothing ever corrects data automatically.

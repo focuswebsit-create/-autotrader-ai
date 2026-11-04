@@ -1,6 +1,6 @@
 # Phase 1 Report — Market Data Engine (xyz:CL, PAPER-ONLY)
 
-**Date:** 2026-11-03 (updated 2026-11-04 after an unplanned overnight outage, §4.2) · **Branch:** `claude/phase1-market-data` · **PR:** #2 (stacked on PR #1 / Phase 0)
+**Date:** 2026-11-03 (updated 2026-11-04: overnight outage §4.2, final review §7b, data-integrity audit §7c) · **Branch:** `claude/phase1-market-data` · **PR:** #2 (stacked on PR #1 / Phase 0)
 **Scope:** historical + live market data from Hyperliquid **mainnet** (read-only). No strategy, no execution engine, no orders of any kind.
 
 > **סיכום בעברית:** מנוע הנתונים אוסף נרות של 30 דקות ושל שעה עבור `xyz:CL` מ־Hyperliquid Mainnet, בקריאה בלבד.
@@ -163,7 +163,7 @@ Active attempts against the running system (run at 16:09 UTC):
 
 Local, Python 3.12 + PostgreSQL 16, with `RUN_LIVE_TESTS=1`:
 - **ruff** clean · **mypy --strict** clean (41 files).
-- **pytest after the final review: 305 passed** (301 + 4 live mainnet); 12 consecutive full runs green. Before the final review:
+- **pytest after the data-integrity work: 308 passed** (unit + 28 PostgreSQL), 5 consecutive full runs green; live mainnet tests 4/4 (run after the review fixes). After the final review: 305 (301 + 4 live). Before the final review:
 - **pytest: 286 passed**:
   - 262 unit: safety 90, discovery 41, WS guard 29, candles 25, API 15 + market API 13, collector 11, resilience 9, storage 8, static 8, REST ingest 7, CLI 6;
   - 20 PostgreSQL;
@@ -200,6 +200,56 @@ An independent reviewer (no access to the author's conclusions) reviewed the ful
 - **Lock DoS:** any DB role, including the read-only one, can take the collector's advisory-lock key and stop it from starting (exit 5). That needs DB credentials and can only *block* writes, never make them. PostgreSQL has no per-key permission for advisory locks.
 
 **Deployed to the running dev system:** migration 0004 applied and the collector gracefully restarted. Closed bar counts were identical before and after, `RUNNING/CONNECTED`, no errors, `fresh=true`.
+
+## 7c. Final data-integrity audit (2026-11-04 07:30 UTC)
+
+Purpose: prove that **no bar stored before the H1 fix** was frozen from partial data, and that the stored data contains no integrity defect.
+
+**Method:**
+- One full `candleSnapshot` per interval (startTime=0), with the request time recorded.
+- Only bars that were closed (end + 5 s) at request time count as "closed at source".
+- Every stored closed bar is compared field by field (open, high, low, close, volume, trade count, open/close time) as exact `Decimal`.
+- Both databases are audited: the main `autotrader_dev` and the outage-test `autotrader_chaos`.
+
+| DB / interval | Closed bars stored | Verified against mainnet | **Value differences** | Bad times / alignment | Closed in DB but open at source | Future bars | Closed before end+5 s | Duplicates | Gaps / unreported |
+|---|---|---|---|---|---|---|---|---|---|
+| dev 30m | 5,038 | **5,006** | **0** | 0 | 0 | 0 | 0 | 0 | 0 / 0 |
+| dev 1h | 5,019 | **5,003** | **0** | 0 | 0 | 0 | 0 | 0 | 0 / 0 |
+| chaos 30m | 5,000 | **4,976** | **0** | 0 | 0 | 0 | 0 | 0 | 0 / 0 |
+| chaos 1h | 5,000 | **4,988** | **0** | 0 | 0 | 0 | 0 | 0 | 0 / 0 |
+
+**Results:**
+- **19,973 closed bars verified, 0 differences.**
+- The new `autotrader repair-candles` dry run independently confirmed the dev result: 5,007 + 5,003 compared, 0 differences.
+- **No correction was needed or applied.**
+
+**Not verifiable now:**
+- 48 bars in dev (32 × 30m from 2026-07-22 08:00, 16 × 1h from 2026-04-09 04:00) and 36 in chaos are older than the API's current window.
+- H1 can only affect a bar closed by a request sent within seconds of the bar's end. Every bar closed that way (2026-11-03 15:43 → 2026-11-04 07:20) is recent and inside the verified range.
+- The unverifiable bars were stored by the first backfill, months after they closed, and 8 + 4 of them were also verified on 2026-11-03 16:02.
+
+**Forming rows:**
+- dev 30m showed 2 forming rows at 07:30:07 UTC: the 07:00 bar (not yet finalized; finalize runs within ~35 s) and the new 07:30 bar from the WS. Neither is marked closed.
+- chaos holds one leftover forming row per interval from the stopped test collector. Since the M3 fix the API never presents it as live (`stale_forming_open_time`).
+
+### Controlled correction path (migration 0005)
+Migration 0004 made closed bars immutable for **everyone, including the owner**, so a corrupt bar could not have been repaired at all. Migration 0005 keeps the default protection and adds one audited path:
+- **Default:** any UPDATE of a closed bar is rejected, as before.
+- **Allowed only if all of these hold:**
+  - a correction ticket is set for the transaction;
+  - the session user is **not** a member of `autotrader_writer` / `autotrader_reader` (the collector and the API cannot use it, even with a ticket);
+  - the bar's identity is unchanged and it stays closed.
+- The trigger itself writes every correction (before/after, ticket, user) into the append-only `audit_log`.
+- **`autotrader repair-candles`:**
+  - dry run by default (read-only);
+  - `--apply` requires `--ticket` and `--backup-dir`;
+  - writes a JSON backup before any change;
+  - corrects all rows in one transaction under the single-writer lock;
+  - records `REVISED_CLOSED_CANDLE` with the ticket.
+- **Verified:**
+  - 6 PostgreSQL tests: ticket required; service role refused even with a ticket; audit row written; the ticket is transaction-local; identity changes and reopening blocked; full backup → apply → idempotent flow.
+  - Live: `--apply` without a ticket → `TICKET_AND_BACKUP_REQUIRED`; while the collector runs → `COLLECTOR_RUNNING`.
+- **Found while doing this:** Alembic's `version_num` is VARCHAR(32), and the first revision id was 33 characters. It was renamed, and a static test now guards all revision ids.
 
 ## 8. Known limitations
 1. **History depth** is limited by the API (~5,000 bars per interval: 30m ≈ 104 days, 1h ≈ 208 days). That's enough for development and validation, but **thin for a statistically strong backtest**, especially at 1h. Phase 2 must report sample sizes and label results INCONCLUSIVE when appropriate. Coverage grows as long as the collector keeps running.
