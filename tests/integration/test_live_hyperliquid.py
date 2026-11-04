@@ -43,3 +43,42 @@ def test_live_candle_availability(interval: str, minutes: int) -> None:
     span_days = (candles[-1]["t"] - candles[0]["t"]) / 86_400_000
     print(f"{interval}: {len(candles)} candles, {span_days:.1f} days")
     assert all(c["s"] == "xyz:CL" for c in candles)
+
+
+def test_live_websocket_candle_stream() -> None:
+    """Guarded read-only WS: subscribe to xyz:CL 30m candles and receive real frames."""
+    import asyncio
+    import json
+
+    from autotrader.common import ws
+    from autotrader.market.candles import Candle, Interval, parse_candle
+
+    async def go() -> dict[str, int]:
+        conn = await ws.connect()
+        seen: dict[str, int] = {}
+        try:
+            await conn.send(
+                json.dumps(
+                    {
+                        "method": "subscribe",
+                        "subscription": {"type": "candle", "coin": "xyz:CL", "interval": "30m"},
+                    }
+                )
+            )
+            await conn.send(json.dumps({"method": "ping"}))
+            deadline = asyncio.get_running_loop().time() + 45
+            while asyncio.get_running_loop().time() < deadline and "candle" not in seen:
+                msg = json.loads(await asyncio.wait_for(conn.recv(), 45))
+                ch = msg.get("channel", "?")
+                seen[ch] = seen.get(ch, 0) + 1
+                if ch == "candle":
+                    assert isinstance(
+                        parse_candle(msg["data"], coin="xyz:CL", interval=Interval.M30), Candle
+                    )
+        finally:
+            await conn.close()
+        return seen
+
+    seen = asyncio.run(go())
+    print(seen)
+    assert seen.get("candle", 0) >= 1 and seen.get("pong", 0) == 1

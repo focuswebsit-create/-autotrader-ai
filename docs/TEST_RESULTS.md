@@ -1,4 +1,32 @@
-# Test Results — Phase 0 (2026-11-03)
+# Test Results
+
+## Phase 1 after the data-integrity audit (2026-11-04, latest)
+```
+ruff / format / mypy --strict  -> clean (44 files)
+pytest (unit + 28 PostgreSQL)  -> 308 passed, 5 consecutive full runs green
+data-integrity audit           -> 19,973 closed bars vs mainnet, 0 differences
+```
+
+## Phase 1 after the final independent review (2026-11-04)
+```
+ruff / format / mypy --strict  -> clean (42 files)
+pytest (unit + PostgreSQL)     -> 301 passed, 12 consecutive full runs green
+pytest -m live (mainnet)       -> 4 passed (REST discovery, 30m/1h candles, guarded WS)
+web: lint / typecheck / build  -> ok
+```
+
+## Phase 1 (2026-11-03)
+```
+ruff check / format --check   -> clean
+mypy --strict                 -> Success: no issues found in 41 source files
+AUTOTRADER_TEST_DATABASE_URL=..._test RUN_LIVE_TESTS=1 uv run pytest
+                              -> 286 passed (262 unit, 20 PostgreSQL, 4 live mainnet)
+web: lint / typecheck / build -> ok
+```
+Live verification, outage test and security attempts: `docs/PHASE1_REPORT.md`.
+
+---
+# Phase 0 (2026-11-03)
 
 ## After QA review (latest)
 ```

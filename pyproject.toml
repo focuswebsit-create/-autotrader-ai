@@ -16,6 +16,7 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "httpx>=0.27",
+    "websockets>=15.0",
 ]
 
 [dependency-groups]
@@ -47,7 +48,8 @@ ignore = ["S101"]  # assert is fine in tests
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "N802"]
-"src/autotrader/db/migrations/**" = ["N", "E501"]
+# Migrations interpolate module-level constants (table/role names), never input.
+"src/autotrader/db/migrations/**" = ["N", "E501", "S608"]
 
 [tool.mypy]
 python_version = "3.12"

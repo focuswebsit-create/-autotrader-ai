@@ -84,17 +84,33 @@ def _imported_modules(text: str) -> set[str]:
     return mods
 
 
-def test_only_http_module_may_import_network_libraries() -> None:
-    """Review L1: every network-capable import must live in common/http.py (guarded)."""
-    allowed = {SRC / "common" / "http.py"}
+#: The only modules that may import a network library, and which ones.
+NETWORK_ALLOWED = {
+    SRC / "common" / "http.py": {"httpx", "urllib.request"},
+    SRC / "common" / "ws.py": {"websockets", "websockets.asyncio.client"},
+}
+
+
+def test_only_guarded_modules_import_network_libraries() -> None:
+    """Every network-capable import lives in common/http.py or common/ws.py (both guarded)."""
     offenders = []
     for path in _py_files():
-        if path in allowed:
-            continue
+        allowed = NETWORK_ALLOWED.get(path, set())
         for mod in _imported_modules(path.read_text()):
+            if mod in allowed:
+                continue
             if any(mod == n or mod.startswith(n + ".") for n in NETWORK_MODULES):
                 offenders.append(f"{path.relative_to(ROOT)}: {mod}")
     assert offenders == []
+
+
+def test_ws_module_validates_before_sending() -> None:
+    text = (SRC / "common" / "ws.py").read_text()
+    assert "check_ws_url(url)" in text
+    send = text[text.index("class GuardedConnection") :]
+    send = send[send.index("async def send") :]
+    body = send[: send.index("async def recv")]
+    assert body.index("check_ws_message") < body.index("self._inner.send")
 
 
 def test_no_dynamic_imports_or_string_built_endpoints() -> None:
@@ -107,3 +123,12 @@ def test_no_dynamic_imports_or_string_built_endpoints() -> None:
     ]
     offenders = [str(p) for p in _py_files() if any(pat.search(p.read_text()) for pat in patterns)]
     assert offenders == []
+
+
+def test_migration_revision_ids_fit_alembic_version_column() -> None:
+    """alembic_version.version_num is VARCHAR(32): longer ids fail only at upgrade time."""
+    versions = SRC / "db" / "migrations" / "versions"
+    for path in versions.glob("*.py"):
+        m = re.search(r'^revision: str = "([^"]+)"', path.read_text(), re.MULTILINE)
+        assert m, path
+        assert len(m.group(1)) <= 32, f"{path.name}: revision id too long ({len(m.group(1))})"

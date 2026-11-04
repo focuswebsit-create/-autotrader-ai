@@ -15,10 +15,13 @@ src/autotrader/
   market/     runtime discovery of xyz:CL (perpDexs + metaAndAssetCtxs, dex=xyz)
   db/         SQLAlchemy models, Alembic migrations, repository
   api/        FastAPI (GET-only)
-  worker/     background worker (Phase 0: discovery loop)
+  ingest/     REST backfill/sync + live WS collector (Phase 1)
+  worker/     discovery job
+  reporting/  data coverage report
   strategy/ risk/ paper/ backtest/ reporting/   (later phases)
 apps/web/     Next.js Hebrew RTL dashboard
 infra/docker/ Dockerfiles
+infra/db/     least-privilege DB users (roles.sql)
 tests/        unit, integration (PostgreSQL, opt-in live), recorded fixtures
 docs/         STATUS, DECISIONS, TEST_RESULTS, screenshots
 ```
@@ -56,7 +59,15 @@ uv run autotrader safety-check
 ```
 
 ```bash
-uv run python -m autotrader.worker
+uv run autotrader backfill        # fetch all available history (REST)
+```
+
+```bash
+uv run autotrader collect         # live collector: discovery, backfill, WS stream, gap fill
+```
+
+```bash
+uv run autotrader data-report     # coverage, gaps and data-quality issues (JSON)
 ```
 
 ```bash
