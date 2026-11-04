@@ -253,6 +253,11 @@ def test_api_role_is_read_only(roles: dict[str, Any]) -> None:
     assert _denied(a, "DELETE FROM data_quality_issues")
 
 
+#: Phase 3 (migration 0009): only the Control API role may read these; see
+#: tests/integration/test_paper_postgres.py::test_auth_tables_are_private
+PRIVATE_AUTH_TABLES = {"auth_users", "auth_sessions", "auth_login_attempts"}
+
+
 def test_every_table_is_granted_to_roles(migrated: str) -> None:
     """New tables in future migrations must not be forgotten in the grants."""
     engine = create_engine(migrated)
@@ -268,6 +273,8 @@ def test_every_table_is_granted_to_roles(migrated: str) -> None:
             .all()
         )
         for t in tables:
+            if t in PRIVATE_AUTH_TABLES:  # Phase 3: password / session hashes stay private
+                continue
             for role in ("autotrader_reader", "autotrader_writer"):
                 ok = c.execute(
                     text("SELECT has_table_privilege(:r, :t, 'SELECT')"), {"r": role, "t": t}

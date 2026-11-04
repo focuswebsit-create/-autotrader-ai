@@ -512,8 +512,12 @@ DECLARE
     max_day int;
     today int;
 BEGIN
-    IF TG_TABLE_NAME = 'paper_orders' AND (NEW.purpose <> 'ENTRY' OR NEW.filled_size = 0) THEN
-        RETURN NEW;  -- exits and rejected entries are always allowed
+    -- nested IF: PL/pgSQL does not short-circuit AND, and paper_positions has no
+    -- "purpose" column
+    IF TG_TABLE_NAME = 'paper_orders' THEN
+        IF NEW.purpose <> 'ENTRY' OR NEW.filled_size = 0 THEN
+            RETURN NEW;  -- exits and rejected entries are always allowed
+        END IF;
     END IF;
     IF st IS DISTINCT FROM 'RUNNING' THEN
         RAISE EXCEPTION 'paper entry refused: bot state is % (only RUNNING may enter)', st;
@@ -621,7 +625,7 @@ def _enforcement() -> None:
     c = "autotrader_controller"
     _grant(f"GRANT INSERT ON paper_commands, audit_log TO {c}", c)
     _grant(
-        f"GRANT SELECT ON auth_users, auth_sessions, auth_login_attempts, "
+        f"GRANT SELECT ON auth_users, auth_sessions, auth_login_attempts, audit_log, "
         f"service_heartbeats, candles, funding_rates TO {c}",
         c,
     )
