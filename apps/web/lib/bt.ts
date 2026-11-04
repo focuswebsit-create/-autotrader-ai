@@ -27,11 +27,11 @@ export const EXIT_REASON: Record<string, string> = {
 
 export const BLOCK_REASON: Record<string, string> = {
   FILLED: "בוצע",
-  REFERENCE_SESSION_CLOSED: "בורסת הייחוס (CME) סגורה",
-  REFERENCE_SESSION_EDGE: "קרוב לפתיחה/סגירה של CME",
-  REFERENCE_HOLIDAY: "חג בבורסת הייחוס",
-  CONTRACT_ROLL_WINDOW: "חלון גלגול חוזה CL",
-  SESSION_CALENDAR_UNKNOWN: "לוח מסחר לא ידוע (חסימה שמרנית)",
+  REFERENCE_SESSION_CLOSED: "מסנן: CME סגורה (xyz:CL עצמו סחיר)",
+  REFERENCE_SESSION_EDGE: "מסנן: קרוב לפתיחה/סגירה של CME",
+  REFERENCE_HOLIDAY: "מסנן: חג ב־CME",
+  CONTRACT_ROLL_WINDOW: "מסנן: חלון גלגול חוזה CL",
+  SESSION_CALENDAR_UNKNOWN: "מסנן: לוח CME לא ידוע (חסימה שמרנית)",
   DAILY_LOSS_LIMIT: "מגבלת הפסד יומית",
   CONSECUTIVE_LOSSES_COOLDOWN: "השהיה אחרי 3 הפסדים רצופים",
   MAX_ENTRIES_PER_DAY: "מקסימום כניסות ביום",
@@ -62,6 +62,7 @@ export const CRITERION: Record<string, string> = {
   walk_forward_oos_positive: "Walk-Forward מחוץ למדגם חיובי",
   survives_2x_costs: "רווחי גם בעלויות כפולות",
   history_covers_regimes: "היסטוריה מספיקה (≥180 יום)",
+  holdout_untouched: "Holdout שלא נחשף קודם",
 };
 
 export function num(s: string | number | null | undefined, d = 2): string {
@@ -92,3 +93,19 @@ export function reason(code: string): string {
   const key = code.startsWith("BLOCKED:") ? code.slice(8) : code;
   return BLOCK_REASON[key] ?? key;
 }
+
+export const CATEGORY: Record<string, string> = {
+  STRATEGY_FILTER: "מסנן אסטרטגי",
+  RISK: "ניהול סיכונים",
+  DATA: "נתונים",
+  MARKET: "שוק (אין מסחר)",
+  SIMULATION: "סימולציה",
+  OTHER: "אחר",
+};
+
+export const PROVENANCE: Record<string, string> = {
+  VERIFIED: "מאומת",
+  OBSERVED: "נמדד בפועל",
+  ASSUMPTION: "הנחה",
+  UNVERIFIED: "לא מאומת",
+};

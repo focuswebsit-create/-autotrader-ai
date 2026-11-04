@@ -161,12 +161,21 @@ def test_selection_never_sees_validation_or_holdout(
     # the dev-only optimisation: every selection run ends at or before the dev boundary
     dev_calls = calls[: rep["optimization"]["grid_size"]]
     assert all(end is not None and end <= dev_end for _, end in dev_calls)
-    # walk-forward selections end at their own train boundary, never inside their test
+    # NO parameter selection anywhere (dev optimisation or walk-forward) sees the holdout
+    assert all(end is not None and end <= holdout_start for _, end in calls)
+    # walk-forward: train ends before test, and every test window ends before the holdout
     for fold in rep["walk_forward"]["folds"]:
         assert datetime.fromisoformat(fold["train_end"]) <= datetime.fromisoformat(
             fold["test_start"]
         )
+        assert datetime.fromisoformat(fold["test_end"]) <= holdout_start
+    assert rep["walk_forward"]["until"] == rep["segments"][2]["start"]
     assert holdout_start >= dev_end
+    # the holdout of this dataset was already reported in PR #3 -> flagged as exposed
+    it = rep["independent_test"]
+    assert it["holdout_status"] == "EXPOSED" and it["status"] == "NONE"
+    crit = {c["criterion"]: c["passed"] for c in rep["verdict"]["criteria"]}
+    assert crit["holdout_untouched"] is False
 
 
 @pytest.fixture(scope="module")
@@ -185,16 +194,24 @@ def test_full_protocol_on_real_data_is_valid_and_honest(reports: dict[str, Any])
         assert crit["history_covers_regimes"] is False
         assert rep["data"]["m30"]["bars"] == 4999 and rep["data"]["m30"]["missing_bars"] == 0
         assert rep["data"]["funding"]["records"] > 0
+        mh = rep["data"]["market_hours"]
+        assert mh["bars_with_trades"] == mh["bars"] and mh["bars_while_cme_closed"] > 1000
+        assert sum(rep["primary"]["blocked_by_category"].values()) == sum(
+            n for k, n in rep["primary"]["decision_counts"].items() if k.startswith("BLOCKED:")
+        )
         s = rep["primary"]["summary"]
         assert s["trades"] == len(rep["primary"]["trades"]) > 0
         # costs are always charged and gross is never presented as net
         assert Decimal(s["fees"]) > 0
-        assert Decimal(s["net_pnl"]) == Decimal(s["gross_pnl_before_costs"]) - Decimal(
-            s["total_costs"]
-        )
+        # each figure is rounded to 4 decimals for display (exact identity is audited per trade)
+        recon = Decimal(s["gross_pnl_before_costs"]) - Decimal(s["total_costs"])
+        assert abs(Decimal(s["net_pnl"]) - recon) <= Decimal("0.0005")
         assert {a["provenance"] for a in rep["assumptions"]} >= {"ASSUMPTION", "VERIFIED"}
         names = [x["scenario"] for x in rep["sensitivity"]]
         assert {"costs_0.5x", "costs_2x", "slippage_10x_shock", "target_first"} <= set(names)
+        assert {"fee_0.045pct_base_tier0", "fee_0.09pct_growth_off", "fee_0.10pct_previous"} <= set(
+            names
+        )
         assert rep["walk_forward"]["folds"]
 
 
@@ -272,7 +289,13 @@ def test_verdict_rules() -> None:
         "stress_2x": _fake(80, None, 0.1, "5"),
         "proto": proto,
     }
-    assert verdict(primary=good, history_days=400, violations=0, **kw)["status"] == "PASS"
+    fresh = datetime(2027, 6, 1, tzinfo=UTC)  # holdout after all exposed data
+    passed = verdict(primary=good, history_days=400, violations=0, holdout_start=fresh, **kw)
+    assert passed["status"] == "PASS"
+    # identical evidence, but the holdout was already seen -> never PASS
+    seen = verdict(primary=good, history_days=400, violations=0, holdout_start=T0, **kw)
+    assert seen["status"] == "INCONCLUSIVE"
+    assert any("already been seen" in r for r in seen["reasons"])
     short = verdict(primary=good, history_days=104, violations=0, **kw)
     assert short["status"] == "INCONCLUSIVE"
     assert any("history" in r for r in short["reasons"])
@@ -282,7 +305,8 @@ def test_verdict_rules() -> None:
         primary=_fake(40, [-0.8, -0.2], -0.5, "-40"), history_days=104, violations=0, **kw
     )
     assert bad["status"] == "FAIL"
-    assert verdict(primary=good, history_days=400, violations=1, **kw)["status"] == "INVALID"
+    bad_audit = verdict(primary=good, history_days=400, violations=1, holdout_start=fresh, **kw)
+    assert bad_audit["status"] == "INVALID"
 
 
 def test_protocol_config_errors() -> None:

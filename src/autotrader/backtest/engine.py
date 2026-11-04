@@ -182,6 +182,40 @@ class SignalRecord:
     trade_id: int | None
     rationale: dict[str, str]
 
+    @property
+    def category(self) -> str:
+        return block_category(self.reason)
+
+
+#: Why a signal did not become a trade. STRATEGY_FILTER blocks are choices of the
+#: strategy (e.g. the CME session filter) - xyz:CL itself remains tradable 24/7.
+BLOCK_CATEGORIES: dict[str, str] = {
+    "FILLED": "FILLED",
+    "REFERENCE_SESSION_CLOSED": "STRATEGY_FILTER",
+    "REFERENCE_SESSION_EDGE": "STRATEGY_FILTER",
+    "REFERENCE_HOLIDAY": "STRATEGY_FILTER",
+    "CONTRACT_ROLL_WINDOW": "STRATEGY_FILTER",
+    "SESSION_CALENDAR_UNKNOWN": "STRATEGY_FILTER",
+    "ABNORMAL_VOLATILITY": "STRATEGY_FILTER",
+    "ABNORMAL_FUNDING": "STRATEGY_FILTER",
+    "DAILY_LOSS_LIMIT": "RISK",
+    "CONSECUTIVE_LOSSES_COOLDOWN": "RISK",
+    "MAX_ENTRIES_PER_DAY": "RISK",
+    "DRAWDOWN_HALT": "RISK",
+    "BANKRUPT": "RISK",
+    "SIZE_BELOW_MINIMUM": "RISK",
+    "INVALID_STOP": "RISK",
+    "NO_NEXT_BAR": "DATA",
+    "DATA_GAP": "DATA",
+    "FUNDING_DATA_MISSING": "DATA",
+    "NO_PLAUSIBLE_EXECUTION": "MARKET",
+    "SKIPPED_FILL_SIMULATED": "SIMULATION",
+}
+
+
+def block_category(reason: str) -> str:
+    return BLOCK_CATEGORIES.get(reason, "OTHER")
+
 
 @dataclass(frozen=True)
 class EquityPoint:

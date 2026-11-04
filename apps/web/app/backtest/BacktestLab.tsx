@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 
-import { BLOCK_REASON, CRITERION, EXIT_REASON, SEGMENT, VERDICT, num, pct, reason, signed, tone } from "@/lib/bt";
+import { BLOCK_REASON, CATEGORY, CRITERION, PROVENANCE, EXIT_REASON, SEGMENT, VERDICT, num, pct, reason, signed, tone } from "@/lib/bt";
 import { getBackend } from "@/lib/client";
 import { fmtUtc } from "@/lib/format";
 import { explain } from "@/lib/i18n";
@@ -399,6 +399,14 @@ function ReportView({ r, header }: { r: Report; header: RunHeader }) {
 
       <Card title="הפרדת אימון ובדיקה (כרונולוגית 70/15/15)" id="segments">
         <p className="mb-2 text-xs muted">אותם פרמטרים קבועים מראש בכל קטע. כל קטע מתחיל עם הון 1,000 ומשתמש בנתונים שלפניו רק לחימום אינדיקטורים.</p>
+        {r.independent_test && !r.independent_test.holdout_untouched && (
+          <p role="alert" className="alert alert-warn mb-2">
+            קטע הבדיקה הסופית (Holdout) כבר נחשף: תוצאותיו דווחו בהרצות קודמות, ובהרצות הראשונות של PR #3 חלונות
+            Walk-Forward אף בחרו עליו פרמטרים. כרגע <strong>אין מבחן עצמאי שלא נחשף</strong>. רק נתונים שנוצרו
+            אחרי <bdi dir="ltr">{fmtUtc(r.independent_test.exposed_until)} UTC</bdi> יכולים לשמש מבחן כזה (כרגע:{" "}
+            {r.independent_test.fresh_bars_after_exposure} נרות בנתונים שנטענו).
+          </p>
+        )}
         <div className="table-wrap">
           <table className="tbl">
             <CompactHead first="קטע" />
@@ -508,6 +516,24 @@ function ReportView({ r, header }: { r: Report; header: RunHeader }) {
             </li>
           ))}
         </ul>
+        {r.primary.blocked_by_category && (
+          <p className="mt-2 text-xs">
+            לפי סוג:{" "}
+            {Object.entries(r.primary.blocked_by_category)
+              .map(([k, n]) => `${CATEGORY[k] ?? k}: ${n}`)
+              .join(" · ")}
+          </p>
+        )}
+        {r.data.market_hours && (
+          <p className="mt-2 text-xs muted">
+            <bdi dir="ltr">xyz:CL</bdi> עצמו נסחר 24/7: ב־{r.data.market_hours.bars_with_trades.toLocaleString("en-US")} מתוך{" "}
+            {r.data.market_hours.bars.toLocaleString("en-US")} נרות היו עסקאות, כולל{" "}
+            {r.data.market_hours.bars_while_cme_closed.toLocaleString("en-US")} נרות בזמן ש־CME סגורה (נפח חציוני{" "}
+            <bdi dir="ltr">{r.data.market_hours.median_volume_cme_closed}</bdi> לעומת{" "}
+            <bdi dir="ltr">{r.data.market_hours.median_volume_cme_open}</bdi>). שעות CME הן מסנן אסטרטגי לכניסות
+            בלבד; יציאות מבוצעות תמיד.
+          </p>
+        )}
       </Card>
 
       <Card title="נתונים, הנחות ושחזור" id="data">
@@ -556,8 +582,8 @@ function ReportView({ r, header }: { r: Report; header: RunHeader }) {
                   <td dir="ltr">{a.item}</td>
                   <td dir="ltr">{a.value}</td>
                   <td>
-                    <span className={`badge ${a.provenance === "VERIFIED" ? "badge-ok" : "badge-warn"}`}>
-                      {a.provenance === "VERIFIED" ? "מאומת" : a.provenance === "ASSUMPTION" ? "הנחה" : "לא מאומת"}
+                    <span className={`badge ${a.provenance === "VERIFIED" || a.provenance === "OBSERVED" ? "badge-ok" : "badge-warn"}`}>
+                      {PROVENANCE[a.provenance] ?? a.provenance}
                     </span>
                   </td>
                   <td className="detail" dir="ltr" style={{ textAlign: "right" }}>

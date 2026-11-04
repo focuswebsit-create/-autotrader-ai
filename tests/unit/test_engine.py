@@ -14,7 +14,8 @@ from autotrader.strategy.base import Side
 from tests.unit.bt_helpers import NO_COSTS, STEP, T0, D, Scripted, bars, flat, run
 
 L, S = Side.LONG, Side.SHORT
-BASE = CostModel(missing_funding_rate=D(0))
+# Engine mechanics are tested with an explicit 0.10% fee (independent of the default).
+BASE = CostModel(taker_fee_rate=D("0.001"), missing_funding_rate=D(0))
 
 
 def _long_stop_bars() -> list:
@@ -335,3 +336,40 @@ def test_offhours_costs_apply_on_holidays() -> None:
     gf = T0.replace(month=4, day=3)
     res, viol = run(flat(5, start=gf), {0: L}, costs=BASE, ex=ExecConfig(session=None))
     assert viol == [] and res.trades[0].entry_offhours
+
+
+def test_default_fee_is_the_observed_xyz_cl_taker_fee() -> None:
+    from autotrader.backtest.costs import OBSERVED_TAKER_FEE
+
+    c = CostModel()
+    assert c.taker_fee_rate == OBSERVED_TAKER_FEE == D("0.00009")
+    fee = next(a for a in c.assumptions() if a["item"] == "taker_fee_rate")
+    assert fee["provenance"] == "OBSERVED"
+    other = next(
+        a
+        for a in CostModel(taker_fee_rate=D("0.001")).assumptions()
+        if a["item"] == "taker_fee_rate"
+    )
+    assert other["provenance"] == "ASSUMPTION"
+
+
+def test_cme_filter_never_blocks_exits_xyz_trades_24_7() -> None:
+    # Entry Friday 19:00 UTC (15:00 NY), stop hit on Saturday while CME is closed.
+    fri = T0 + timedelta(days=3, hours=5)
+    rows = [(80, 80.1, 79.9, 80)] * 2 + [(80, 80.1, 79.9, 80)] * 10 + [(80, 80.1, 77, 78)]
+    rows += [(78, 78.1, 77.9, 78)] * 2
+    res, viol = run(bars(rows, start=fri), {0: L}, costs=BASE)
+    assert viol == []
+    t = res.trades[0]
+    assert t.exit_reason is ExitReason.STOP and t.exit_offhours  # exited on Saturday
+    assert t.exit_time.weekday() == 5
+
+
+def test_blocked_signals_are_categorised() -> None:
+    from autotrader.backtest.engine import block_category
+
+    sat = T0 + timedelta(days=4)
+    res, _ = run(flat(5, start=sat), {0: L}, costs=BASE)
+    assert res.signals[0].category == "STRATEGY_FILTER"
+    assert block_category("DAILY_LOSS_LIMIT") == "RISK"
+    assert block_category("NO_PLAUSIBLE_EXECUTION") == "MARKET"

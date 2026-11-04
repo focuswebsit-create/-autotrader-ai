@@ -251,7 +251,7 @@ export type Compact = {
   violations: number;
 };
 
-export type Assumption = { item: string; value: string; provenance: "VERIFIED" | "ASSUMPTION" | "UNVERIFIED"; note: string };
+export type Assumption = { item: string; value: string; provenance: "VERIFIED" | "OBSERVED" | "ASSUMPTION" | "UNVERIFIED"; note: string };
 
 export type Report = {
   schema: string;
@@ -267,6 +267,15 @@ export type Report = {
     h1: { bars: number; first_open: string; last_close: string; gaps: number; missing_bars: number };
     funding: { records: number; first: string | null; last: string | null; provenance: string };
     history_days_30m: number;
+    market_hours?: {
+      bars: number;
+      bars_with_trades: number;
+      min_trades_per_bar: number | null;
+      bars_while_cme_closed: number;
+      median_volume_cme_open: string | null;
+      median_volume_cme_closed: string | null;
+      conclusion: string;
+    };
     fingerprint_sha256: string;
     limitation: string;
   };
@@ -278,6 +287,7 @@ export type Report = {
     trades: BtTrade[];
     equity: [string, string, string][];
     decision_counts: Record<string, number>;
+    blocked_by_category?: Record<string, number>;
     signals: { time: string; side: string; status: string; reason: string; trade_id: number | null }[];
     events: { time: string; event: string; detail: string }[];
     halted: string | null;
@@ -289,6 +299,15 @@ export type Report = {
     selected_params: Record<string, string | number | null>;
     selected_params_hash: string;
     segments: (Compact & { name: string; start: string; end: string })[];
+    note: string;
+  };
+  independent_test?: {
+    holdout_untouched: boolean;
+    holdout_status: "UNTOUCHED" | "EXPOSED";
+    exposed_until: string;
+    fresh_bars_after_exposure: number;
+    fresh_days_after_exposure: number;
+    status: "AVAILABLE" | "NONE";
     note: string;
   };
   walk_forward: {

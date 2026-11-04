@@ -46,7 +46,7 @@ from autotrader.strategy.base import Bar, StrategyParams, contiguous_segments, p
 from autotrader.strategy.strategies import STRATEGIES, build_strategy, default_params
 
 REPORT_SCHEMA = "backtest-report/1"
-ENGINE_VERSION = "2.0.0"
+ENGINE_VERSION = "2.1.0"
 BAR = timedelta(minutes=30)
 
 
@@ -85,6 +85,10 @@ class Protocol:
     min_history_days: int = 180
     #: trades a grid candidate needs on the training data to be selectable
     min_trades_for_selection: int = 8
+    #: Everything that opened before this instant has already been SEEN in reported
+    #: results (PR #3 runs, 2026-11-04, incl. the 70/15/15 holdout and walk-forward
+    #: folds that trained on it). A holdout that starts earlier is not independent.
+    exposed_until: datetime = datetime(2026, 11, 4, 8, 0, tzinfo=UTC)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +99,7 @@ class Protocol:
             "min_holdout_trades": self.min_holdout_trades,
             "min_history_days": self.min_history_days,
             "min_trades_for_selection": self.min_trades_for_selection,
+            "exposed_until": self.exposed_until.isoformat(),
         }
 
 
@@ -332,11 +337,18 @@ def _trade_stats(trades: Sequence[Trade], initial: Decimal) -> dict[str, Any]:
 
 
 def walk_forward(
-    runner: Runner, strategy_id: str, proto: Protocol, warmup_bars: int
+    runner: Runner,
+    strategy_id: str,
+    proto: Protocol,
+    warmup_bars: int,
+    *,
+    until: datetime | None = None,
 ) -> dict[str, Any]:
+    """Rolling walk-forward. ``until`` (the holdout start) bounds every train AND test
+    window, so no walk-forward parameter selection ever sees holdout data."""
     data = runner.data
     first = data.m30[warmup_bars].close_time
-    last = data.m30[-1].close_time
+    last = until if until is not None else data.m30[-1].close_time
     train, test = timedelta(days=proto.wf_train_days), timedelta(days=proto.wf_test_days)
     grid = GRIDS[strategy_id]()
     folds: list[dict[str, Any]] = []
@@ -374,9 +386,11 @@ def walk_forward(
         "folds": folds,
         "oos": _trade_stats(oos, runner.risk.initial_equity),
         "violations": violations,
-        "note": "Rolling folds cover the whole history, so later TRAIN windows overlap the "
-        "validation/holdout segments of the 70/15/15 split. Walk-forward is a separate "
-        "out-of-sample check; it is not the untouched holdout.",
+        "until": _iso(until),
+        "note": "Walk-forward covers development + validation only and ends at the holdout "
+        "start: no train window, test window or parameter selection touches the holdout."
+        if until is not None
+        else "Walk-forward covers the whole history (no holdout bound).",
     }
 
 
@@ -400,7 +414,16 @@ def _scenarios(base: CostModel, ex: ExecConfig) -> list[tuple[str, str, CostMode
         ("skip_10pct_fills", "10% מהכניסות לא מתבצעות", base,
          replace(ex, skip_fill_rate=Decimal("0.1"))),
         ("delay_1_bar", "כניסה מאוחרת בנר אחד", base, replace(ex, extra_entry_delay_bars=1)),
-        ("no_session_gate", "ללא חסימת שעות CL (להשוואה בלבד)", base, replace(ex, session=None)),
+        ("no_session_gate", "ללא מסנן שעות CME (xyz:CL עצמו סחיר 24/7)", base,
+         replace(ex, session=None)),
+        ("fee_0.0045pct_maker_tier0", "עמלה 0.0045% (כמו Maker בדרגה 0, אופטימי)",
+         replace(base, taker_fee_rate=Decimal("0.000045")), ex),
+        ("fee_0.045pct_base_tier0", "עמלה 0.045% (Taker בסיסי דרגה 0, ללא HIP-3)",
+         replace(base, taker_fee_rate=Decimal("0.00045")), ex),
+        ("fee_0.09pct_growth_off", "עמלה 0.09% (אם Growth Mode יבוטל, הסקה)",
+         replace(base, taker_fee_rate=Decimal("0.0009")), ex),
+        ("fee_0.10pct_previous", "עמלה 0.10% (ההנחה הקודמת)",
+         replace(base, taker_fee_rate=Decimal("0.001")), ex),
     ]  # fmt: skip
 
 
@@ -431,6 +454,7 @@ def verdict(
     history_days: float,
     proto: Protocol,
     violations: int,
+    holdout_start: datetime | None = None,
 ) -> dict[str, Any]:
     s = primary.summary
     ci = s["expectancy_r_ci95"]
@@ -466,6 +490,12 @@ def verdict(
             "history_covers_regimes",
             history_days >= proto.min_history_days,
             f"{history_days:.0f} days of 30m history (need >= {proto.min_history_days})",
+        ),
+        (
+            "holdout_untouched",
+            holdout_start is not None and holdout_start >= proto.exposed_until,
+            f"holdout starts {_iso(holdout_start)}; data before "
+            f"{_iso(proto.exposed_until)} has already been seen in reported results",
         ),
     ]
     table = [{"criterion": c, "passed": ok, "detail": d} for c, ok, d in criteria]
@@ -519,7 +549,8 @@ def evaluate_strategy(
     chosen_hash = params_hash(strategy_id, strat.version, chosen)
     opt_out = {name: runner.run(strategy_id, chosen, start=a, end=b) for name, a, b in segs}
 
-    wf = walk_forward(runner, strategy_id, proto, warm)
+    holdout_start = segs[2][1]
+    wf = walk_forward(runner, strategy_id, proto, warm, until=holdout_start)
 
     sens: list[dict[str, Any]] = []
     stress_2x = primary
@@ -553,6 +584,7 @@ def evaluate_strategy(
         history_days=hist_days,
         proto=proto,
         violations=total_violations,
+        holdout_start=holdout_start,
     )
     res = primary.result
     report: dict[str, Any] = {
@@ -580,12 +612,14 @@ def evaluate_strategy(
             "trades": [trade_json(t) for t in res.trades],
             "equity": [[_iso(p.time), _d(p.equity, 4), _d(p.worst, 4)] for p in res.equity],
             "decision_counts": res.decision_counts,
+            "blocked_by_category": _by_category(res.signals),
             "signals": [
                 {
                     "time": _iso(s.signal_time),
                     "side": s.side.value,
                     "status": s.status,
                     "reason": s.reason,
+                    "category": s.category,
                     "trade_id": s.trade_id,
                 }
                 for s in res.signals
@@ -611,6 +645,7 @@ def evaluate_strategy(
             "note": "Development results of the selected parameters are in-sample and "
             "optimistic by construction. Only validation/holdout are out-of-sample.",
         },
+        "independent_test": _independent_test(data, proto, holdout_start),
         "walk_forward": wf,
         "sensitivity": sens,
         "robustness": robust,
@@ -620,6 +655,32 @@ def evaluate_strategy(
     }
     report["report_sha256"] = report_digest(report)
     return report
+
+
+def _by_category(signals: Sequence[Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for sig in signals:
+        if sig.status == "BLOCKED":
+            out[sig.category] = out.get(sig.category, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _independent_test(data: MarketData, proto: Protocol, holdout_start: datetime) -> dict[str, Any]:
+    fresh = [b for b in data.m30 if b.open_time >= proto.exposed_until]
+    untouched = holdout_start >= proto.exposed_until
+    return {
+        "holdout_untouched": untouched,
+        "holdout_status": "UNTOUCHED" if untouched else "EXPOSED",
+        "exposed_until": _iso(proto.exposed_until),
+        "fresh_bars_after_exposure": len(fresh),
+        "fresh_days_after_exposure": round(len(fresh) / 48, 2),
+        "status": "AVAILABLE" if untouched else "NONE",
+        "note": "The holdout segment was used for parameter selection inside walk-forward "
+        "folds in the PR #3 runs and its results were reported. There is currently NO "
+        "untouched independent test; only data after exposed_until (forward data) can be one."
+        if not untouched
+        else "Holdout starts after all previously reported data.",
+    }
 
 
 def report_digest(report: dict[str, Any]) -> str:
@@ -663,9 +724,37 @@ def _data_info(data: MarketData, hist_days: float) -> dict[str, Any]:
             "provenance": "VERIFIED (Hyperliquid fundingHistory)" if ft else "MISSING",
         },
         "history_days_30m": round(hist_days, 2),
+        "market_hours": _market_hours(data.m30),
         "fingerprint_sha256": data.fingerprint(),
         "limitation": "Hyperliquid candleSnapshot returns only the most recent 5,000 bars per "
         "interval (~104 days at 30m). No longer history was used or fabricated.",
+    }
+
+
+def _market_hours(bars: Sequence[Bar]) -> dict[str, Any]:
+    """Observed tradability of xyz:CL itself, separate from the CME strategy filter."""
+    from statistics import median
+
+    from autotrader.strategy.sessions import ReferenceSession
+
+    closed = [b for b in bars if not ReferenceSession.reference_trading(b.open_time)]
+    open_ = [b for b in bars if ReferenceSession.reference_trading(b.open_time)]
+    with_trades = sum(1 for b in bars if b.volume > 0 and (b.trades is None or b.trades > 0))
+
+    def med(xs: Sequence[Bar]) -> str | None:
+        return str(median(b.volume for b in xs).quantize(Decimal(1))) if xs else None
+
+    return {
+        "bars": len(bars),
+        "bars_with_trades": with_trades,
+        "min_trades_per_bar": min((b.trades for b in bars if b.trades is not None), default=None),
+        "bars_while_cme_closed": len(closed),
+        "median_volume_cme_open": med(open_),
+        "median_volume_cme_closed": med(closed),
+        "conclusion": "xyz:CL is a 24/7 market: every bar in the data has trades, including "
+        "weekends and CME holidays. The CME calendar is a STRATEGY FILTER for new entries "
+        "(thin, reference-less price discovery), not a tradability constraint; exits are "
+        "always simulated when the perp trades.",
     }
 
 
@@ -674,11 +763,13 @@ def _other_assumptions() -> list[dict[str, str]]:
 
     return [
         {
-            "item": "reference_session",
+            "item": "cme_strategy_filter",
             "value": "CME Globex CL: Sun 18:00-Fri 17:00 NY, daily break 17-18",
             "provenance": "UNVERIFIED",
-            "note": PROVENANCE + ". Entries blocked outside, 30 min around edges, on holidays "
-            "and in the 2 business days up to each CL expiry.",
+            "note": PROVENANCE + ". STRATEGY FILTER only: xyz:CL itself trades 24/7 (verified "
+            "from candles). New entries are filtered outside CME hours, 30 min around edges, "
+            "on holidays and in the 2 business days up to each CL expiry; exits are never "
+            "blocked.",
         },
         {
             "item": "stop_fill",

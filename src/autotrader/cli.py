@@ -244,9 +244,16 @@ def _backtest(args: argparse.Namespace) -> int:
         return 3
     settings, sessions = env
     now = datetime.now(UTC)
+    as_of = now
+    if args.as_of:
+        as_of = datetime.fromisoformat(args.as_of)
+        if as_of.tzinfo is None or as_of > now:
+            print(json.dumps({"ok": False, "code": "INVALID_AS_OF"}), file=sys.stderr)
+            return 2
     ids = list(STRATEGIES) if args.strategy == "all" else [args.strategy]
     with sessions() as s:
-        data = load_market_data(s, settings.market_coin, as_of=now)
+        # only bars CLOSED by as_of and funding published by as_of are visible
+        data = load_market_data(s, settings.market_coin, as_of=as_of)
     if len(data.m30) < 500 or len(data.h1) < 200:
         print(
             json.dumps({"ok": False, "code": "INSUFFICIENT_DATA", "m30": len(data.m30)}),
@@ -308,6 +315,11 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--strategy", default="all", choices=["all", *STRATEGIES])
     bt.add_argument("--no-save", action="store_true", help="do not store the run in the DB")
     bt.add_argument("--out-dir", help="also write each JSON report to this directory")
+    bt.add_argument(
+        "--as-of",
+        help="ISO time with timezone: use only data closed by then (reproduce an earlier "
+        "dataset; keeps later, never-seen data untouched)",
+    )
     bt.set_defaults(func=_backtest)
     co = sub.add_parser("collect", help="run the live market-data collector")
     co.set_defaults(func=_collect)

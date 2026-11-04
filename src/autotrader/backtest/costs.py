@@ -6,8 +6,19 @@
 * ``ASSUMPTION`` - a modelling choice we could not verify. Results depend on it,
                    so every report shows it and the sensitivity runs vary it.
 
-Defaults are the blueprint's conservative baseline (ADR-005): 0.10% taker fee
-per fill and 0.05% adverse slippage per side, plus an explicit half-spread.
+Fee (ADR-028): the official fee page could not be reached from the research
+environment, so the taker fee was measured from the exchange's own records:
+21,260 public ``xyz:CL`` fills (``userFills``/``userFillsByTime`` of addresses
+seen on the public trade stream) and each user's ``userFees`` tier. On
+``xyz:CL`` the charged fee is 0.2 x the user's perp tier rate; a tier-0 taker
+(0.045%) paid 0.0090% per fill (0.00864% with the 4% referral discount),
+constantly from Sep to Nov 2026. That is consistent with HIP-3's 2x fee and
+growth mode's 90% reduction (``growthMode: enabled`` since 2026-01-06 in
+``metaAndAssetCtxs``), but that explanation is inferred, not documented here.
+Jul-Aug 2026 was not directly observed. Growth mode can be switched off, so
+0.045% / 0.09% / 0.10% are run as sensitivity scenarios.
+
+Slippage stays at the conservative 0.05% per side, plus an explicit half-spread.
 The half-spread default (1 bp) is informed by live ``impactPxs``/``l2Book``
 observations of roughly 0.5-1 bp full spread during the reference session; it
 is NOT a historical spread series (Hyperliquid does not provide one), so it is
@@ -29,6 +40,12 @@ class Provenance(StrEnum):
     VERIFIED = "VERIFIED"
     ASSUMPTION = "ASSUMPTION"
     UNVERIFIED = "UNVERIFIED"
+    #: measured from the exchange's own records (not from documentation)
+    OBSERVED = "OBSERVED"
+
+
+#: Tier-0 taker fee actually charged on xyz:CL fills, Sep-Nov 2026 (see module docstring).
+OBSERVED_TAKER_FEE = Decimal("0.00009")
 
 
 class FundingMode(StrEnum):
@@ -42,7 +59,7 @@ class FundingMode(StrEnum):
 
 @dataclass(frozen=True)
 class CostModel:
-    taker_fee_rate: Decimal = Decimal("0.001")
+    taker_fee_rate: Decimal = OBSERVED_TAKER_FEE
     half_spread_rate: Decimal = Decimal("0.0001")
     slippage_rate: Decimal = Decimal("0.0005")
     offhours_multiplier: Decimal = Decimal(2)
@@ -96,9 +113,14 @@ class CostModel:
             {
                 "item": "taker_fee_rate",
                 "value": pct(self.taker_fee_rate),
-                "provenance": Provenance.ASSUMPTION,
-                "note": "Blueprint baseline, applied to every fill (entries, stops and targets). "
-                "Actual HIP-3 fee for xyz:CL (deployerFeeScale/growthMode) not verified.",
+                "provenance": Provenance.OBSERVED
+                if self.taker_fee_rate == OBSERVED_TAKER_FEE
+                else Provenance.ASSUMPTION,
+                "note": "Charged on every fill (entries, stops, time exits AND targets, i.e. "
+                "targets are not given the lower maker rate). 0.0090% = tier-0 taker fee "
+                "measured on 21,260 public xyz:CL fills (0.2 x tier rate, Sep-Nov 2026; "
+                "Jul-Aug not observed). Official fee page unreachable; HIP-3/growth-mode "
+                "explanation inferred. Growth mode can end: see fee scenarios.",
             },
             {
                 "item": "half_spread_rate",
