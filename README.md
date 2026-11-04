@@ -5,7 +5,7 @@ Research and **paper-trading** (simulation) system for Hyperliquid's HIP-3 WTI o
 > ⚠️ **PAPER / NO REAL MONEY.** This system reads public mainnet market data only. It has no wallet, accepts no private keys, and can't send orders: the authenticated `/exchange` endpoint is blocked in code and by tests.
 
 Specification: [`PROJECT_BLUEPRINT.md`](PROJECT_BLUEPRINT.md) · Working rules: [`CLAUDE_MASTER_PROMPT.md`](CLAUDE_MASTER_PROMPT.md)
-Phase 2 results: [`docs/PHASE2_REPORT.md`] (Backtest Lab at http://localhost:3000/backtest) · Phase 2.5: [`docs/PHASE2_5_REPORT.md`] (http://localhost:3000/forward) · Deployment plan: [`docs/DEPLOYMENT.md`] · Status: [`docs/STATUS.md`](docs/STATUS.md) · Decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) · Evidence: [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)
+Phase 3 (PAPER terminal, http://localhost:3000/terminal): [`docs/PHASE3_REPORT.md`](docs/PHASE3_REPORT.md) · Phase 2 results: [`docs/PHASE2_REPORT.md`] (Backtest Lab at http://localhost:3000/backtest) · Phase 2.5: [`docs/PHASE2_5_REPORT.md`] (http://localhost:3000/forward) · Deployment plan: [`docs/DEPLOYMENT.md`] · Status: [`docs/STATUS.md`](docs/STATUS.md) · Decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) · Evidence: [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)
 
 ## Layout
 
@@ -94,11 +94,27 @@ uv run autotrader forward status  # forward results, recomputed from the journal
 ```
 
 ```bash
+uv run autotrader paper init      # Phase 3: create the virtual account (1,000 USDC, STOPPED)
+```
+
+```bash
+uv run autotrader paper run       # Phase 3: PAPER execution engine on the live L2 book (keep running)
+```
+
+```bash
+uv run autotrader user create --username owner --role ADMIN   # owner login for bot control
+```
+
+```bash
 uv run uvicorn autotrader.api.main:app --port 8000
 ```
 
 ```bash
-cd apps/web && npm ci && API_BASE_URL=http://localhost:8000 npm run dev
+AUTOTRADER_CONTROL_SECRET=<48 random chars> AUTOTRADER_COOKIE_SECURE=false uv run uvicorn autotrader.control.main:app --host 127.0.0.1 --port 8001
+```
+
+```bash
+cd apps/web && npm ci && API_BASE_URL=http://localhost:8000 CONTROL_BASE_URL=http://localhost:8001 npm run dev
 ```
 
 ## Checks

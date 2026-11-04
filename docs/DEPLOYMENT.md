@@ -82,7 +82,7 @@ It runs exactly the Docker Compose stack that CI already builds and tests, keeps
    - Create the VPS (Ubuntu 24.04 LTS), enable provider backups, and add your SSH public key (no password login).
    - Install Docker Engine + Compose, Tailscale and `unattended-upgrades`.
    - Firewall: deny all inbound; allow SSH only, ideally only via Tailscale.
-2. **Code:** `git clone` the repository at the merged `main` commit, then `cp .env.example .env` and set strong random values for `POSTGRES_PASSWORD`, `AUTOTRADER_API_DB_PASSWORD`, `AUTOTRADER_WORKER_DB_PASSWORD` and `HEALTHCHECK_PING_URL`. Also set `AUTOTRADER_GIT_SHA=$(git rev-parse HEAD)`. **Never** add any key or wallet variable: the app refuses to start if one exists.
+2. **Code:** `git clone` the repository at the merged `main` commit, then `cp .env.example .env` and set strong random values for `POSTGRES_PASSWORD`, `AUTOTRADER_API_DB_PASSWORD`, `AUTOTRADER_WORKER_DB_PASSWORD`, `AUTOTRADER_CONTROL_DB_PASSWORD`, `AUTOTRADER_CONTROL_SECRET` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) and `HEALTHCHECK_PING_URL`. Set `AUTOTRADER_PUBLIC_ORIGINS` to the exact URL you open the terminal on (e.g. `https://autotrader.<tailnet>.ts.net`) and keep `AUTOTRADER_COOKIE_SECURE=true` (HTTPS via Tailscale Serve or Caddy). Also set `AUTOTRADER_GIT_SHA=$(git rev-parse HEAD)`. **Never** add any key or wallet variable: the app refuses to start if one exists.
 3. **Start:** `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`.
 4. **Verify:**
    - `docker compose ps`: all services healthy;
@@ -90,15 +90,21 @@ It runs exactly the Docker Compose stack that CI already builds and tests, keeps
    - `/api/collector/status` and `/api/forward/health`;
    - the dashboard through the Tailscale IP.
 5. **Data:** the collector backfills automatically. Then run `docker compose run --rm forward autotrader backtest` once, which stores the reference backtest with the final code.
-6. **Freeze (once):** `docker compose run --rm forward autotrader forward freeze`. Tests start at the next 30m boundary.
-7. **Monitoring:**
+6. **Phase 3 PAPER terminal (once):**
+   - Create the virtual account: `docker compose run --rm paper-trader autotrader paper init` (1,000 USDC, state STOPPED).
+   - Create the owner login (the DB owner role is needed): `docker compose run --rm migrate autotrader user create --username owner --role ADMIN`.
+   - On an existing database volume, re-run `infra/db/roles.sql` once with `-v control_password=...` (the init hook only runs on a fresh volume).
+   - Open `/terminal`, log in, check that every readiness check is green, then press "התחל לסחור לבד".
+7. **Freeze (once):** `docker compose run --rm forward autotrader forward freeze`. Tests start at the next 30m boundary.
+8. **Monitoring:**
    - Create a healthchecks.io check with a 5-minute period and 15-minute grace, with e-mail/Telegram alerts.
    - Confirm that the first pings arrive.
    - Test an alert by stopping `forward` for 20 minutes.
-8. **Backups:**
+   - The monitor pings success only when **both** `/api/forward/health` and `/api/paper/health` answer 200. The paper check is 503 when the paper-trader is down or a bot is HALTED (risk limit or Kill Switch: needs review).
+9. **Backups:**
    - Configure the off-site copy (§5).
    - Run `infra/deploy/restore-drill.sh` once after the first nightly backup, then monthly.
-9. **Observation:** leave the stack running untouched for 30–60+ days. Check `/forward` weekly; alerts cover failures.
+10. **Observation:** leave the stack running untouched for 30–60+ days. Check `/forward` weekly; alerts cover failures.
 
 ## 4. Operating rules during an active forward test
 
@@ -131,7 +137,8 @@ It runs exactly the Docker Compose stack that CI already builds and tests, keeps
 - [x] Least-privilege DB users: the API has SELECT only; workers have INSERT, plus UPDATE on the market-data tables only, and no DELETE, TRUNCATE or DDL.
 - [x] Forward journal: UPDATE, DELETE and TRUNCATE are rejected; writes must happen in real time (±5 min of the DB clock), which also rejects replays.
 - [x] Dependency audits: `npm audit` reports 0 vulnerabilities; `pip-audit` finds no known vulnerabilities in the locked Python dependencies.
-- [ ] **Before any exposure beyond Tailscale:** put the dashboard behind authentication (Caddy basic auth or Cloudflare Access). The app itself has no login yet; Phase 4 will add role-based access.
+- [x] Phase 3: bot control requires a login (ADMIN role, CSRF, Origin check, rate limits, audit log); see ADR-034. Read-only pages stay viewable without a login.
+- [ ] **Before any exposure beyond Tailscale:** still put the whole site behind an access layer (Tailscale only, or Cloudflare Access). The read-only pages, including P&L, have no login, and the owner login is a single password with no 2FA.
 - [ ] Rotate the DB passwords from `.env.example`. Never commit `.env`.
 
 ## 7. What the owner needs to do (no payment details or keys are needed by me)
