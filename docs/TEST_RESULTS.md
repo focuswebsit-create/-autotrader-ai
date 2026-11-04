@@ -130,3 +130,20 @@ GET /api/backtest/runs, /runs/{id}   -> 200; /runs/1x via web proxy -> 404; POST
 Playwright (iPhone 13 + 1280px)      -> no console errors, no horizontal overflow
 ```
 Determinism: repeated runs on the same data give identical `report_sha256`; file-based and DB-based runs gave identical results.
+
+## Phase 2 pre-merge research audit (2026-11-04)
+```
+uv run ruff check / format --check, mypy                 -> clean
+AUTOTRADER_TEST_DATABASE_URL=...test uv run pytest       -> 405 passed, 4 skipped (402 earlier + 3 new; several extended)
+RUN_LIVE_TESTS=1 uv run pytest -m live                   -> 4 passed
+npm run lint / typecheck / build                         -> clean
+autotrader backtest --as-of 2026-11-04T08:00:05+00:00    -> runs 7-9, data fingerprint f869a045... (same as PR #3), 0 audit violations
+```
+New and extended tests:
+- No parameter selection run (dev optimisation or walk-forward) ends after the holdout start.
+- The holdout is flagged EXPOSED; PASS is impossible without an untouched holdout.
+- The default fee is the observed 0.009% with `OBSERVED` provenance.
+- Exits happen on a Saturday while CME is closed.
+- Blocked signals are categorised.
+- `market_hours` shows every bar traded.
+- The fee scenarios are present in every report.

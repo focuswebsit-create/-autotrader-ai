@@ -52,6 +52,6 @@ Full review and fixes: see `docs/QA_REVIEW_PHASE0.md`. Locally: 178 tests passed
 | INCONCLUSIVE when the sample can't prove an edge | ✅ |
 | Hebrew Backtest Lab (chart with entries/exits, equity, KPIs, trades) | ✅ `/backtest` |
 
-Results (2026-11-04, 104 days of 30m data): EMA 20/50+RSI **FAIL**, Trend Following **FAIL**, Breakout+Volume **INCONCLUSIVE**. No strategy shows an edge after costs.
+Results after the pre-merge research audit (2026-11-04, 104 days of 30m data, observed fee 0.009%): EMA 20/50+RSI **FAIL**, Trend Following **INCONCLUSIVE**, Breakout+Volume **INCONCLUSIVE** (break-even). No strategy shows an edge after costs. The holdout of this dataset is EXPOSED: no untouched independent test exists until forward data after 2026-11-04 08:00 UTC accumulates (ADR-029).
 
 ## Next: Phase 3 — Autonomous forward paper engine (NOT started; awaiting owner approval)

@@ -5,8 +5,9 @@
 
 > **סיכום בעברית:** נבנה מנוע Backtest דטרמיניסטי שמשתמש רק בנרות סגורים אמיתיים של `xyz:CL` ונכנס לעסקה רק בפתיחת הנר הבא.
 > כל העלויות נכללות: עמלות, Spread ו־Slippage (הנחות מסומנות) ו־Funding (נתונים אמיתיים מ־Hyperliquid).
-> שלוש אסטרטגיות נבדקו על כ־104 ימים של נרות 30 דקות. **אף אחת לא הראתה יתרון אחרי עלויות:**
-> EMA 20/50 + RSI — **FAIL**, Trend Following — **FAIL**, Breakout + Volume — **INCONCLUSIVE**.
+> שלוש אסטרטגיות נבדקו על כ־104 ימים של נרות 30 דקות. **אף אחת לא הראתה יתרון אחרי עלויות.**
+> אחרי בדיקת האמינות (סעיף 6c, עמלה אמיתית 0.009%): EMA 20/50 + RSI — **FAIL**, Trend Following — **INCONCLUSIVE**, Breakout + Volume — **INCONCLUSIVE** (איזון אפס).
+> נתוני ה־Holdout כבר נחשפו — כרגע אין מבחן עצמאי שלא נחשף.
 > ההיסטוריה הזמינה (5,000 נרות) קצרה מכדי להוכיח יתרון. לכן אין לעבור למסחר אמיתי, וגם במסחר הווירטואלי של שלב 3 צריך להתייחס לתוצאות כהשערה בלבד.
 
 ---
@@ -117,6 +118,49 @@ No HIGH or MEDIUM findings. Six LOW findings, all fixed in the second commit (pr
 4. Zero-volume check used the fill bar's volume (known only after the fill) → uses the signal bar.
 5. Missing funding feed let entries through the abnormal-funding gate → `FUNDING_DATA_MISSING` blocks (fail closed).
 6. Walk-forward train windows overlap the holdout segment → stated in the report; the holdout criterion uses only the dev-locked parameters.
+
+## 6c. Research & reliability audit (pre-merge, 2026-11-04)
+
+**1. Data separation / holdout.** The dev-only optimisation never used validation or holdout. However, walk-forward folds in the earlier PR #3 runs **trained on (selected parameters on) holdout data**, and holdout results were reported. Fixed: walk-forward now stops at the holdout start (ADR-029). The holdout of this dataset is still **EXPOSED**: **there is currently no untouched independent test.** The verdict can no longer PASS on this dataset (`holdout_untouched` criterion). Only forward data after 2026-11-04 08:00 UTC can serve as a clean test.
+
+**2. Fees.** The docs site is unreachable from this environment, so the fee was measured from the exchange's own public records (ADR-028). The actual tier-0 taker fee on `xyz:CL` is **0.0090%** (0.2 × the 0.045% tier rate, growth mode). The old assumption was 0.10%, about 11× higher. Jul–Aug 2026 was not observed, and growth mode can end, so the fee scenarios are reported.
+
+**3. Trading hours.** `xyz:CL` traded in every 30m bar for 104 days, weekends and holidays included. CME hours are a strategy filter for entries only; exits are never blocked (ADR-030).
+
+**4. Re-run on the identical dataset** (`--as-of 2026-11-04T08:00:05Z`, fingerprint `f869a045…`, commit `bd10502`, 0 audit violations). Strategy parameters are unchanged. Nothing was optimised on the holdout.
+
+| | EMA 20/50 + RSI | | Trend Following | | Breakout + Volume | |
+|---|---|---|---|---|---|---|
+| | before | **after** | before | **after** | before | **after** |
+| Verdict | FAIL | **FAIL** | FAIL | **INCONCLUSIVE** | INCONCLUSIVE | **INCONCLUSIVE** |
+| Trades | 35 | 35 | 45 | 51 | 49 | 49 |
+| Win rate | 17.1% | 17.1% | 24.4% | 23.5% | 30.6% | 30.6% |
+| Profit factor | 0.32 | 0.44 | 0.50 | 0.60 | 0.73 | 1.00 |
+| P&L before costs | −19.96 | −23.57 | −17.01 | −25.50 | +10.07 | +13.79 |
+| Total costs | 26.30 | 14.23 | 22.51 | 10.67 | 31.86 | 13.77 |
+| — of which fees | 16.07 | 1.77 | 16.52 | 2.02 | 22.81 | 2.55 |
+| **Net P&L** | −46.26 | **−37.80** | −39.53 | **−36.17** | −21.79 | **+0.02** |
+| Max drawdown | 4.75% | 4.39% | 5.18% | 5.08% (halt) | 3.41% | 2.73% |
+| Expectancy (R) | −0.54 | −0.44 | −0.36 | −0.29 | −0.18 | 0.00 |
+| 95% CI (R) | [−0.82, −0.21] | [−0.78, −0.03] | [−0.63, −0.04] | [−0.56, +0.04] | [−0.49, +0.15] | [−0.37, +0.41] |
+| Validation (trades, net) | 6, −14.23 | 6, −14.07 | 8, −12.71 | 8, −11.78 | 8, −0.13 | 8, +4.10 |
+| Holdout, pre-registered params (exposed) | 8, −13.25 | 8, −11.57 | 9, −7.26 | 9, −5.18 | 10, −12.89 | 10, −9.53 |
+| Holdout, dev-optimised params | 9, −1.05 | 9, +2.17 | 8, −8.12 | 8, −6.74 | 8, −8.19 | 8, −4.86 |
+| Walk-forward OOS (folds, trades, net, R) | 4, 24, −23.62, −0.39 | 3, 17, −16.45, −0.39 | 4, 33, −50.95, −0.62 | 3, 27, −31.77, −0.47 | 4, 23, −33.90, −0.59 | 3, 15, −25.19, −0.67 |
+| Net at 2× costs | −46.88 | −39.02 | −42.53 | −37.92 | −47.54 | −21.38 |
+| Net at fee 0.045% / 0.09% / 0.10% | — | −41.58 / −45.49 / −46.26 | — | −32.30 / −38.51 / −39.53 | — | −9.81 / −19.84 / −21.79 |
+
+Why figures moved:
+- **Primary results:** only the fee changed. With the 0.10% fee, the new code reproduces the old results exactly.
+- **Gross P&L moved too,** because position size is set from risk *including* costs: lower fees allow slightly larger positions.
+- **Trend Following has more trades** (45 → 51) because its 5% drawdown halt came later.
+- **Walk-forward:** it now has 3 folds ending before the holdout, instead of 4 folds that reached into it.
+
+Interpretation:
+- **Breakout + Volume** breaks even after realistic fees (+0.02 USDC on 49 trades). It loses on the holdout, in walk-forward OOS, at 2× costs and at any fee ≥ 0.045%. It shows no edge, and the verdict stays INCONCLUSIVE.
+- **Trend Following** moves from FAIL to INCONCLUSIVE only because the CI's upper end now crosses 0 (+0.04 R). It still loses before costs, in every segment and in walk-forward.
+- **EMA 20/50 + RSI** is still FAIL: it loses before costs and the CI is entirely below 0.
+- Costs are now dominated by the **0.05%/side slippage assumption**, not by fees.
 
 ## 7. Security review
 

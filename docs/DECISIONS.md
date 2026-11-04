@@ -153,3 +153,24 @@ The database keeps all bars it has ever collected, so coverage grows over time w
 ## ADR-027 — Runs are immutable and audited (2026-11-04)
 - Every run is checked by an independent auditor (`backtest/validation.py`): no look-ahead, reference prices inside the traded bar, fills never better than the reference, exact accounting identity, risk limits, no overlap. Any violation ⇒ `INVALID`.
 - Runs are stored in `backtest_runs` / `backtest_trades` with parameter hash, data fingerprint, git commit and report sha256; a trigger rejects UPDATE/DELETE. The API only reads them (GET); runs are created by `autotrader backtest`.
+
+## ADR-028 — Taker fee measured from the exchange's own records (2026-11-04, research audit)
+**Context.** The official fee page (`hyperliquid.gitbook.io/.../trading/fees`) is not reachable from the research environment (network policy). The 0.10% fee was the blueprint's placeholder.
+**Evidence (public, unsigned Info API; no keys):**
+- `userFees` schedule: perp tier 0 = 0.045% taker / 0.015% maker; VIP tiers down to 0.024% / 0; referral discount 4%; staking discounts 5–40%.
+- `metaAndAssetCtxs` for `xyz:CL`: `deployerFeeScale = 1.0`, `growthMode = enabled`, `lastFeeScaleChangeTime = 2026-01-06` (market launch).
+- 21,260 `xyz:CL` fills of 28 addresses taken from the public trade stream (`userFills`), each compared with that user's `userFees` tier: the charged fee is **0.2 × the user's tier rate**. Tier-0 takers paid **0.0090%** per fill (0.00864% with the referral discount), every month Sep–Nov 2026 (437 fills). Jul–Aug was not observed.
+- 0.2× fits "HIP-3 fee 2× base, growth mode −90%", but that explanation is **inferred**, not read from documentation.
+**Decision.** Baseline taker fee = 0.0090% per fill, provenance `OBSERVED`. It is still charged on targets too (no maker rebate assumed). Scenarios 0.0045%, 0.045%, 0.09% (growth mode off, inferred) and 0.10% (old assumption) are in every report. Slippage stays at the conservative 0.05% per side and is now the largest cost.
+
+## ADR-029 — The holdout of the current dataset is exposed (2026-11-04, research audit)
+- In the first PR #3 runs, rolling walk-forward folds covered the whole history, so the last folds **selected parameters on data inside the 70/15/15 holdout** (2026-10-19 → 2026-11-04). Holdout results were also reported (runs 1–6).
+- Fix: walk-forward now ends at the holdout start (`until`); every train window, test window and parameter selection lies in development + validation. Tested by spying on every selection run.
+- The dev-only optimisation never touched the holdout (re-verified).
+- Even so, the holdout of this dataset has been **seen**. `Protocol.exposed_until = 2026-11-04T08:00Z` records it. The report field `independent_test` is `NONE`, and the new verdict criterion `holdout_untouched` makes PASS impossible until a holdout starts after that instant. **There is currently no untouched independent test**; only forward data after 2026-11-04 08:00 UTC can provide one.
+- Re-runs for comparison use `autotrader backtest --as-of 2026-11-04T08:00:05Z` (same data fingerprint `f869a045…`), so the never-seen data stays unused.
+
+## ADR-030 — xyz:CL trades 24/7; the CME calendar is only a strategy filter (2026-11-04, research audit)
+- Observed: every one of the 5,000 30m bars (and 5,000 1h bars) has trades, with at least 31 trades per 30m bar, including all weekends and CME holidays. There are no gaps.
+- While CME is closed, median 30m volume is ≈5.6× lower (6,994 vs 39,253) and there are ≈2.3× fewer trades. That is the basis for the entry filter and for the 2× off-hours spread/slippage assumption.
+- The engine never blocks exits on CME hours. Entry blocks are categorised (`STRATEGY_FILTER`, `RISK`, `DATA`, `MARKET`, `SIMULATION`); CME-based codes are `STRATEGY_FILTER`, not "market closed". Reports include a `market_hours` section computed from the data.
