@@ -13,6 +13,7 @@ action is written to the append-only audit_log.
 
 from __future__ import annotations
 
+import hmac
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -131,9 +132,7 @@ def create_control_app(
     def require_csrf(request: Request) -> None:
         token = request.cookies.get(auth.COOKIE_NAME) or ""
         sent = request.headers.get("x-csrf-token", "")
-        import hmac as _h
-
-        if not sent or not _h.compare_digest(sent, auth.csrf_for(key, token)):
+        if not token or not sent or not hmac.compare_digest(sent, auth.csrf_for(key, token)):
             raise HTTPException(status_code=403, detail="CSRF_INVALID")
 
     @app.get("/control/health")
@@ -144,7 +143,7 @@ def create_control_app(
     def login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
         check_origin(request)
         ip = client_ip(request)
-        if not login_limiter.allow(f"ip:{ip}"):
+        if not login_limiter.allow(f"ip:{ip}", clock().timestamp()):
             raise HTTPException(status_code=429, detail="RATE_LIMITED")
         now = clock()
         chash = auth.client_hash(ip)
@@ -234,7 +233,7 @@ def create_control_app(
         check_origin(request)
         require_csrf(request)
         _sess, user = current(request, admin=True)
-        if not action_limiter.allow(f"user:{user.id}"):
+        if not action_limiter.allow(f"user:{user.id}", clock().timestamp()):
             raise HTTPException(status_code=429, detail="RATE_LIMITED")
         cmd = COMMANDS[action]
         if cmd in NEEDS_CONFIRM and not body.confirm:
