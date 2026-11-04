@@ -107,3 +107,70 @@ New: `tests/unit/test_forward.py` (24 tests), plus PostgreSQL tests for the jour
 - No new network destinations. The worker reads the database and calls only the public Info API (`fundingHistory`) through the existing allow-listed client.
 - All new API routes are GET. The web proxy allows only `forward/tests`, `forward/tests/<id>` and `forward/tests/<id>/decisions`.
 - No wallet, key or order code. `autotrader safety-check` passes.
+
+---
+
+## 10. Live resilience run on Hyperliquid mainnet (2026-11-04, 10:28–12:32 UTC)
+
+**Setup:**
+- Cloud dev container with PostgreSQL 16, the market-data collector (WS + REST), the forward worker and the API.
+- Forward tests **#4–#6** were frozen at 10:28:39 UTC and started at 10:30 UTC.
+- A verified backup (`pg_dump` + `pg_restore --list` + sha256) was taken before the first outage.
+- Every outage was time-bounded and scripted. Every check was read-only (SQL plus the GET API) and logged with timestamps.
+- **No frozen code was changed during the run.**
+
+| # | Test | Window (UTC) | Result | Evidence |
+|---|---|---|---|---|
+| A | Real-time decision on the first bar (an on-the-hour close) | 11:00 | **PASS** | 3 decisions at 11:00:45, `late=false`; the 1h-bar wait worked (no `TREND_DATA_MISSING`); health 200 `OK` |
+| B1 | Forward-worker outage detected | 11:02:02 stop → 11:12:51, 11:32:04, 11:33:38 | **PASS** | `/api/forward/health` HTTP 503 `FORWARD_WORKER_DOWN` at every check; last heartbeat 11:02:02, state `STOPPED` (clean SIGTERM) |
+| B2 | No decisions while the worker is down | 11:02–11:42 | **PASS** | the 11:00 bar was closed in the DB at 11:33:38 but undecided; the count stayed 3 |
+| B3 | Recovery after the worker restart | 11:42:04 → 11:44:06 | **PASS** | the 11:00 bar was decided at 11:42:05 with **`late=true`**, one row per test; ordered = true; duplicates 0, pre-start 0, look-ahead 0; parity 2/2, 0 mismatches; real-time 1 / late 1 per test; health 200 `OK` |
+| C1 | Collector outage detected | 11:45:04 stop → 11:57:27, 12:02:00 | **PASS** | HTTP 503 `COLLECTOR_STOPPED` (+ `DATA_STALE` 30m/1h at 12:02); heartbeat `STOPPED`, WS `DISCONNECTED` |
+| C2 | No data invented during the outage | 12:02:00 | **PASS** | the 11:30 bar (closed on the exchange at 12:00) remained `closed=false` in the DB; no decision for it |
+| C3 | Recovery after the collector restart | 12:05:01 → 12:06:31 | **PASS** | gap filled from REST (`src=rest`) for the 30m 11:30 and 1h 11:00 bars; the bar was decided at 12:05:27; health 200 `OK` |
+| D1 | Forward worker survives a PostgreSQL restart | 12:10:03 | **PASS** | worker alive at 12:10:23; it kept recording (12:00 bar decided at 12:30:21) |
+| D2 | Collector after a PostgreSQL restart | 12:10:02 → 12:11:56 | **PASS (fail-closed) + manual restart** | the collector stopped itself (`single-writer lock lost`, ADR-020: never two writers). This container has no process supervisor, so it was started once by hand, emulating `restart: always` (configured in `docker-compose.prod.yml`). After that: `RUNNING`, WS `CONNECTED`, health `OK`, no data loss. **Automatic restart was not tested here; it must be verified on the server.** |
+| E1 | Real-time decision after all outages | 12:30:21 | **PASS** | 12:00 bar decided `late=false`; **first live signal: test #6 Breakout + Volume SHORT** (downtrend + breakdown + volume; mark 94.748 / oracle 94.740), pending entry at the next bar |
+| E2 | Overall integrity | 12:31:30 | **PASS** | duplicates 0; decisions before the start 0; decisions before their bar closed 0; no DATA_GAP or DATA_STALE event for tests #4–#6; all closed bars present |
+| E3 | Live/replay parity on PostgreSQL | 12:31:30 | **FAIL → fixed** | test #6 showed 1 mismatch on its SIGNAL bar, which made the test INVALID. See §10.1. |
+
+**Forward decisions recorded live, after the freeze (tests #4–#6; the historical replay is not included):**
+- 12 decisions in total: **9 in real time** (`late=false`) and **3 late** (`late=true`, the 11:00 bar decided after the worker outage);
+- 1 signal (SHORT, test #6);
+- 0 duplicates.
+
+The 11:30 bar was decided 5 min 27 s after it closed because the collector was down. That is below the 10-minute `late` threshold, so it counts as real time by definition.
+
+Tests #1–#3 (frozen 10:12) were stopped at 10:20:24 with **`INTEGRITY_HALT`** when code under the frozen hash changed on disk. They are kept and labelled, never deleted, as designed.
+
+### 10.1 Bug found by the live run: NUMERIC rounding broke parity on PostgreSQL (fixed)
+
+**Symptom.** Test #6's first live SIGNAL produced a parity mismatch, so its verdict became INVALID.
+
+**Cause.** `forward_decisions.atr` is `NUMERIC(38,18)`. PostgreSQL rounded the stored ATR to `0.689650506380416124`, while the replay computed `0.6896505063804161241237483115980913`, and parity compared the two exactly. No-signal decisions have no ATR, which is why phases A–D didn't show it. The unit tests use SQLite, which stores exact decimal text, so they couldn't see it. **Every forward test on PostgreSQL would have become INVALID at its first signal.**
+
+**Fix:**
+- `freeze.stored_decimal()` applies the column scale with PostgreSQL's rounding (half away from zero).
+- The recorder stores values at that scale, and parity compares at it.
+
+**Proof:**
+- New end-to-end test `test_forward_replay_parity_on_postgresql`: 4 days of recorded mainnet data replayed into PostgreSQL.
+  - **Without the fix:** 4 mismatches out of 191 decisions, all on SIGNAL bars.
+  - **With the fix:** 0 mismatches.
+- Running the fixed code read-only against the live database: tests #4–#6 parity 4/4 each, 0 mismatches.
+
+**Effect on the running tests.** The fix changes code under the frozen hash. It was therefore made in a separate worktree and **not deployed to the running test**, so the live evidence stays as recorded. Once it is deployed, tests #4–#6 will stop with `INTEGRITY_HALT` (kept, labelled), and the official forward tests must be frozen **on the persistent server after this PR is merged** (`docs/DEPLOYMENT.md` §3 step 6).
+
+### 10.2 Not tested here (must be verified on the server)
+
+- Automatic restart by Docker (`restart: always`) after a crash or a PostgreSQL restart.
+- Reboot of the whole machine.
+- The external dead-man's-switch alert (healthchecks.io).
+- Nightly backups over several days, and the off-site copy.
+- A forward observation of 30+ days.
+
+This cloud container is ephemeral and can't demonstrate 24/7 operation.
+
+**Tests after the fix:**
+- 439 passed, 4 skipped (the live tests run separately);
+- ruff, ruff format and mypy clean.

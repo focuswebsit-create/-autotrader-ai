@@ -39,6 +39,7 @@ from autotrader.forward.freeze import (
     execution_from_config,
     params_from_config,
     risk_from_config,
+    stored_decimal,
     strategy_code_hash,
     thresholds_from_config,
 )
@@ -348,7 +349,8 @@ def _parity(
         same = (
             (d.side.value if d.side else None) == r.side
             and d.reason == r.reason
-            and (d.atr == r.atr or (d.atr is None and r.atr is None))
+            # compared at the stored NUMERIC(38,18) scale: PostgreSQL rounds on write
+            and stored_decimal(d.atr) == stored_decimal(r.atr)
         )
         if not same:
             mism.append(

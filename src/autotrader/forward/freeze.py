@@ -84,6 +84,19 @@ def next_bar_boundary(t: datetime) -> datetime:
     return epoch + n * BAR
 
 
+#: decimal places of the NUMERIC(38,18) columns that store decision values
+STORED_SCALE = Decimal("1e-18")
+
+
+def stored_decimal(x: Decimal | None) -> Decimal | None:
+    """A value exactly as PostgreSQL NUMERIC(38,18) stores it (round half away from
+    zero). Used when writing AND when comparing, so live and replayed decisions are
+    identical on every database."""
+    from decimal import ROUND_HALF_UP
+
+    return None if x is None else x.quantize(STORED_SCALE, rounding=ROUND_HALF_UP)
+
+
 def canonical_sha256(obj: Any) -> str:
     return hashlib.sha256(
         json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str).encode()

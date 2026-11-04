@@ -207,7 +207,14 @@ def test_live_decisions_equal_full_history_recompute(live: Any, recorded_market:
     idx = {b.open_time: i for i, b in enumerate(m30)}
     for r in rows:
         d = prepared.decide(idx[r.bar_open_time.replace(tzinfo=UTC)])
-        assert (d.side.value if d.side else None, d.reason, d.atr) == (r.side, r.reason, r.atr)
+        # values are stored at the NUMERIC(38,18) column scale (as PostgreSQL does)
+        from autotrader.forward.freeze import stored_decimal
+
+        assert (d.side.value if d.side else None, d.reason, stored_decimal(d.atr)) == (
+            r.side,
+            r.reason,
+            r.atr,
+        )
 
 
 def test_report_is_recomputed_valid_and_inconclusive(live: Any) -> None:
@@ -659,3 +666,25 @@ def test_health_ignores_superseded_halted_tests(
     assert f"FORWARD_TEST_{old}_INTEGRITY_HALT" not in codes  # superseded by test `new`
     tests = c.get("/api/forward/tests").json()["tests"]
     assert {t["id"]: t["state"] for t in tests} == {new: "ACTIVE", old: "INTEGRITY_HALT"}
+
+
+def test_stored_decimal_matches_postgres_numeric_rounding() -> None:
+    """Review of the live run: PostgreSQL NUMERIC(38,18) rounds the ATR on write, so
+    parity compared a rounded stored value with a full-precision replay (INVALID on
+    the first signal). Both sides are now compared at the stored scale."""
+    from autotrader.forward.freeze import stored_decimal
+
+    replay = Decimal("0.6896505063804161241237483115980913")  # value from the live run
+    assert stored_decimal(replay) == Decimal("0.689650506380416124")  # what PG stored
+    assert stored_decimal(Decimal("0.0000000000000000005")) == Decimal("1E-18")  # half up
+    assert stored_decimal(None) is None
+
+
+def test_recorded_atr_is_stored_at_column_scale(live: Any) -> None:
+    sessions, _tid, _until, _ = live
+    with sessions() as s:
+        atrs = [
+            r.atr
+            for r in s.scalars(select(ForwardDecision).where(ForwardDecision.side.is_not(None)))
+        ]
+    assert atrs and all(a is not None and -a.as_tuple().exponent <= 18 for a in atrs)
