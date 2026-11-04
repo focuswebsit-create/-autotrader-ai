@@ -545,3 +545,55 @@ def test_apply_requires_ticket(migrated: str, tmp_path: Any) -> None:
     sessions = sessionmaker(bind=create_engine(migrated))
     with pytest.raises(ValueError, match="ticket"):
         apply_corrections(sessions, "xyz:CL", Interval.M30, [], {}, ticket=" ", backup_dir=tmp_path)
+
+
+# ------------------------------------------------------------ Phase 2: backtest storage (0006)
+
+
+def test_backtest_runs_are_immutable_and_roundtrip(migrated: str, recorded_market: Any) -> None:
+    from datetime import UTC, datetime
+
+    from autotrader.backtest.research import evaluate_strategy
+    from autotrader.backtest.store import get_run, save_run
+
+    sessions = sessionmaker(bind=create_engine(migrated), expire_on_commit=False)
+    report = evaluate_strategy(recorded_market, "breakout_volume", code_version="test")
+    with sessions.begin() as s:
+        run_id = save_run(s, report, now=datetime.now(UTC)).id
+    with sessions() as s:
+        row = get_run(s, run_id)
+        assert row is not None and row.report["report_sha256"] == report["report_sha256"]
+        assert row.verdict == report["verdict"]["status"]
+    engine = create_engine(migrated)
+    for sql in (
+        "UPDATE backtest_runs SET verdict='PASS'",
+        "DELETE FROM backtest_trades",
+        "DELETE FROM backtest_runs",
+    ):
+        with pytest.raises(DBAPIError), engine.begin() as c:
+            c.execute(text(sql))
+
+
+def test_funding_rates_append_only(migrated: str) -> None:
+    from datetime import UTC, datetime
+
+    engine = create_engine(migrated)
+    now = datetime.now(UTC)
+    with engine.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO funding_rates (coin, time, hour, rate, source, received_at) "
+                "VALUES ('xyz:CL', :t, :t, 0.0001, 'test', :t)"
+            ),
+            {"t": now},
+        )
+    with pytest.raises(DBAPIError), engine.begin() as c:
+        c.execute(text("UPDATE funding_rates SET rate = 0"))
+    with pytest.raises(DBAPIError), engine.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO funding_rates (coin, time, hour, rate, source, received_at) "
+                "VALUES ('xyz:CL', :t, :t, 0.0001, 'dup', :t)"
+            ),
+            {"t": now},
+        )

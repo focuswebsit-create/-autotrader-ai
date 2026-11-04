@@ -103,3 +103,50 @@ npm run build      -> Compiled successfully; "/" is dynamic (server-rendered on 
 2. Coin `xyz:` (empty symbol) was accepted → validation now requires a non-empty symbol.
 3. Live calls failed behind an HTTPS proxy because a custom httpx transport ignores proxy env vars → ADR-009.
 4. RTL rendering scrambled parentheses in the market card title → Latin parts are wrapped in `<bdi>`.
+
+
+---
+
+# Phase 2 — Backtesting & Strategy Engine (2026-11-04)
+
+```
+uv run ruff check src tests && uv run ruff format --check src tests   -> All checks passed
+uv run mypy                                                         -> Success: no issues found in 57 source files
+AUTOTRADER_TEST_DATABASE_URL=...autotrader_test uv run pytest      -> 402 passed, 4 skipped (live, opt-in)
+RUN_LIVE_TESTS=1 uv run pytest -m live                              -> 4 passed
+npm run lint / typecheck / build                                    -> clean; routes "/" and "/backtest" dynamic
+uv run autotrader safety-check                                      -> PAPER, only POST /info
+```
+
+Coverage of new modules: engine 98%, metrics 100%, indicators 98%, sessions 99%, strategies 93%, research 88%, funding ingest 96% (total 91%).
+
+End-to-end on a fresh PostgreSQL 16 database:
+```
+alembic upgrade head                 -> 0006_backtest
+autotrader backfill                  -> 30m: 5,001 received, 0 gaps; 1h: 5,001 received, 0 gaps
+autotrader funding-sync              -> 7,242 hourly records (2026-01-06 15:00 -> 2026-11-04 08:00)
+autotrader backtest                  -> runs stored; ema_rsi FAIL, trend_pullback FAIL, breakout_volume INCONCLUSIVE; 0 audit violations
+GET /api/backtest/runs, /runs/{id}   -> 200; /runs/1x via web proxy -> 404; POST -> 405
+Playwright (iPhone 13 + 1280px)      -> no console errors, no horizontal overflow
+```
+Determinism: repeated runs on the same data give identical `report_sha256`; file-based and DB-based runs gave identical results.
+
+## Phase 2 pre-merge research audit (2026-11-04)
+```
+uv run ruff check / format --check, mypy                 -> clean
+AUTOTRADER_TEST_DATABASE_URL=...test uv run pytest       -> 405 passed, 4 skipped (402 earlier + 3 new; several extended)
+RUN_LIVE_TESTS=1 uv run pytest -m live                   -> 4 passed
+npm run lint / typecheck / build                         -> clean
+autotrader backtest --as-of 2026-11-04T08:00:05+00:00    -> runs 7-9, data fingerprint f869a045... (same as PR #3), 0 audit violations
+```
+New and extended tests:
+- No parameter selection run (dev optimisation or walk-forward) ends after the holdout start.
+- The holdout is flagged EXPOSED; PASS is impossible without an untouched holdout.
+- The default fee is the observed 0.009% with `OBSERVED` provenance.
+- Exits happen on a Saturday while CME is closed.
+- Blocked signals are categorised.
+- `market_hours` shows every bar traded.
+- The fee scenarios are present in every report.
+
+### CI fix
+The GitHub Actions `backend` job failed on `ddeb798` (run #14). `test_backtest_api_without_db` used `Settings()`, which reads `AUTOTRADER_DATABASE_URL`. CI exports that variable, so the "no DB" test reached a database whose tables an integration test had just dropped. The test is now explicit (`Settings(database_url=None)`). Reproduced locally with the CI environment before the fix (1 failed) and verified after it: 405 passed both with and without `AUTOTRADER_DATABASE_URL`.

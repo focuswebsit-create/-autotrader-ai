@@ -196,6 +196,88 @@ def _repair(args: argparse.Namespace) -> int:
             release_collector_lock(lock_conn)
 
 
+def _funding_sync(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime, timedelta
+
+    from autotrader.ingest.funding import sync_funding
+
+    check_environment()
+    assert_paper_mode()
+    env = _require_db()
+    if env is None:
+        return 3
+    settings, sessions = env
+    now = datetime.now(UTC)
+    start = now - timedelta(days=args.days)
+    with InfoClient() as client, sessions.begin() as s:
+        r = sync_funding(s, client, settings.market_coin, start=start, now=now)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "coin": settings.market_coin,
+                "received": r.received,
+                "inserted": r.inserted,
+                "rejected": r.rejected,
+                "pages": r.pages,
+                "first_hour": r.first.isoformat() if r.first else None,
+                "last_hour": r.last.isoformat() if r.last else None,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _backtest(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from autotrader.backtest.research import evaluate_strategy
+    from autotrader.backtest.store import code_version, load_market_data, run_header, save_run
+    from autotrader.strategy.strategies import STRATEGIES
+
+    check_environment()
+    assert_paper_mode()
+    env = _require_db()
+    if env is None:
+        return 3
+    settings, sessions = env
+    now = datetime.now(UTC)
+    as_of = now
+    if args.as_of:
+        as_of = datetime.fromisoformat(args.as_of)
+        if as_of.tzinfo is None or as_of > now:
+            print(json.dumps({"ok": False, "code": "INVALID_AS_OF"}), file=sys.stderr)
+            return 2
+    ids = list(STRATEGIES) if args.strategy == "all" else [args.strategy]
+    with sessions() as s:
+        # only bars CLOSED by as_of and funding published by as_of are visible
+        data = load_market_data(s, settings.market_coin, as_of=as_of)
+    if len(data.m30) < 500 or len(data.h1) < 200:
+        print(
+            json.dumps({"ok": False, "code": "INSUFFICIENT_DATA", "m30": len(data.m30)}),
+            file=sys.stderr,
+        )
+        return 4
+    version = code_version()
+    out = []
+    for sid in ids:
+        report = evaluate_strategy(data, sid, code_version=version)
+        report["generated_at"] = now.isoformat()
+        if args.out_dir:
+            path = Path(args.out_dir) / f"backtest_{sid}.json"
+            path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
+        if args.no_save:
+            header = {"strategy_id": sid, "verdict": report["verdict"]["status"]}
+        else:
+            with sessions.begin() as s:
+                header = run_header(save_run(s, report, now=now))
+        out.append(header | {"verdict_reasons": report["verdict"]["reasons"]})
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _collect(_: argparse.Namespace) -> int:
     from autotrader.collector_main import main as collector_main
 
@@ -224,6 +306,21 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--ticket", help="correction ticket id (required with --apply)")
     rp.add_argument("--backup-dir", help="directory for the pre-change backup (required)")
     rp.set_defaults(func=_repair)
+    fs = sub.add_parser("funding-sync", help="fetch recorded funding history (read-only)")
+    fs.add_argument("--days", type=int, default=400, help="how far back to request")
+    fs.set_defaults(func=_funding_sync)
+    from autotrader.strategy.strategies import STRATEGIES
+
+    bt = sub.add_parser("backtest", help="run the Phase 2 research protocol (PAPER research)")
+    bt.add_argument("--strategy", default="all", choices=["all", *STRATEGIES])
+    bt.add_argument("--no-save", action="store_true", help="do not store the run in the DB")
+    bt.add_argument("--out-dir", help="also write each JSON report to this directory")
+    bt.add_argument(
+        "--as-of",
+        help="ISO time with timezone: use only data closed by then (reproduce an earlier "
+        "dataset; keeps later, never-seen data untouched)",
+    )
+    bt.set_defaults(func=_backtest)
     co = sub.add_parser("collect", help="run the live market-data collector")
     co.set_defaults(func=_collect)
     args = parser.parse_args(argv)

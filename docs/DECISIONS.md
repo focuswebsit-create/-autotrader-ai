@@ -121,3 +121,56 @@ The database keeps all bars it has ever collected, so coverage grows over time w
 - Migration 0005 adds a single correction path, usable only by a non-service DB user with a transaction-local `autotrader.correction_ticket`. It may not change a bar's identity or reopen it, and the trigger writes before/after into the append-only `audit_log`.
 - Corrections are made only with `autotrader repair-candles --apply --ticket … --backup-dir …`: a JSON backup is written before any change, everything happens in one transaction under the writer lock, and `REVISED_CLOSED_CANDLE` is recorded.
 - Nothing ever corrects data automatically.
+
+## ADR-022 — Phase 2 research protocol fixed before results (2026-11-04)
+- **Primary result** = each strategy's pre-registered default parameters (blueprint / strategy definition, not fitted to this data) on all available history.
+- Chronological **70/15/15** split (development / validation / holdout). Each segment uses earlier bars only for indicator warm-up and is force-closed at its end.
+- **Optimisation** only on development (small grid, objective = after-cost expectancy in R with ≥ 8 trades). The chosen parameters are hashed and evaluated once on validation and holdout. Holdout is never used for selection (tested).
+- **Walk-forward**: rolling 42-day train → 14-day test; only test trades are aggregated.
+- **Verdict**: `PASS` only if all criteria hold (0 audit violations, ≥ 30 trades, 95% bootstrap CI of expectancy > 0, holdout ≥ 10 trades and net > 0, walk-forward OOS > 0, still profitable at 2× costs, ≥ 180 days of 30m history). `FAIL` only if ≥ 30 trades and the CI is entirely below 0. Otherwise `INCONCLUSIVE` with the failed criteria. With ~104 days of 30m history a PASS is impossible by construction (ADR-006).
+
+## ADR-023 — Execution model for OHLC-only data (2026-11-04)
+- Decisions are made at the close of a closed 30m bar; entries fill at the **next bar's open** (never the signal close). The last bar of a window is reserved for the forced exit.
+- Market fills (entries, stops, time exits) pay half-spread + adverse slippage; prices are rounded to the market tick in the adverse direction (5 significant figures, ≤ 3 decimals for `xyz:CL`).
+- Stop: stop-market at the stop level, or at the open if the bar gaps through it (loss may exceed the plan; reported, not hidden).
+- Target: limit; counts only if the bar trades **through** it (touch is not enough); a gap beyond it fills at the target, not better; taker fee is still charged.
+- **Stop and target in the same bar → stop first** (default). `TARGET_FIRST` and `OPEN_PROXIMITY` exist only as sensitivity scenarios.
+- No bar after the signal, a data gap, or a zero-volume entry bar → no fill (`NO_NEXT_BAR`, `DATA_GAP`, `NO_PLAUSIBLE_EXECUTION`).
+
+## ADR-024 — Costs: verified vs assumed (2026-11-04)
+- **Verified:** hourly funding from Hyperliquid `fundingHistory` (stored in `funding_rates`, 7,242 hours since the market opened on 2026-01-06, no missing hour); candles; tick/lot precision. Positive rate ⇒ longs pay. Funding is charged for hours `entry < h ≤ exit` on notional at the 30m close at that hour (oracle history is not available — approximation).
+- **Assumed (labelled in every report):** taker fee 0.10% per fill (blueprint baseline; actual HIP-3 fee not verifiable here), half-spread 0.01%, slippage 0.05% per side, 2× spread/slippage outside the CME session, missing funding hour = 0.00125%/h against the position, minimum order 10 USDC.
+- Stress scenarios: costs ×0.5 / ×2, slippage ×2 / ×10, funding zero / ×2 / always adverse, skipped fills, one-bar delay, no session gate, alternative ambiguity rules, ±20% parameter perturbation.
+
+## ADR-025 — WTI reference session gates entries (2026-11-04)
+- `xyz:CL` trades 24/7 but its reference (NYMEX CL on CME Globex) does not: recorded weekend volume is ~10× lower. New entries are allowed only Sun 18:00 → Fri 17:00 New York time, outside the 17:00–18:00 daily break, not within 30 min of an open/close, not on CME holidays, and not on the 2 business days up to each CL expiry. Outside 2025-01-01…2027-12-31 the calendar is unknown and entries are blocked (fail closed).
+- The schedule and holidays are from prior knowledge (CME pages unreachable here) — **UNVERIFIED**. Exits stay possible off-hours (the perp trades) with doubled spread/slippage.
+
+## ADR-026 — Risk rules in the backtest (2026-11-04)
+- 1,000 USDC virtual equity; risk 0.25% per trade sized to the stop **including** fees, spread and worst-case slippage; notional ≤ 2× equity; one position; ≤ 4 entries per UTC day; daily loss 1% (realised + conservative unrealised) blocks entries until 00:00 UTC; 5% drawdown from the high-water mark halts entries for the rest of the run.
+- Deviation from the Phase 3 rule: 3 consecutive losses pause entries until 00:00 UTC (a backtest can't wait for a manual review).
+
+## ADR-027 — Runs are immutable and audited (2026-11-04)
+- Every run is checked by an independent auditor (`backtest/validation.py`): no look-ahead, reference prices inside the traded bar, fills never better than the reference, exact accounting identity, risk limits, no overlap. Any violation ⇒ `INVALID`.
+- Runs are stored in `backtest_runs` / `backtest_trades` with parameter hash, data fingerprint, git commit and report sha256; a trigger rejects UPDATE/DELETE. The API only reads them (GET); runs are created by `autotrader backtest`.
+
+## ADR-028 — Taker fee measured from the exchange's own records (2026-11-04, research audit)
+**Context.** The official fee page (`hyperliquid.gitbook.io/.../trading/fees`) is not reachable from the research environment (network policy). The 0.10% fee was the blueprint's placeholder.
+**Evidence (public, unsigned Info API; no keys):**
+- `userFees` schedule: perp tier 0 = 0.045% taker / 0.015% maker; VIP tiers down to 0.024% / 0; referral discount 4%; staking discounts 5–40%.
+- `metaAndAssetCtxs` for `xyz:CL`: `deployerFeeScale = 1.0`, `growthMode = enabled`, `lastFeeScaleChangeTime = 2026-01-06` (market launch).
+- 21,260 `xyz:CL` fills of 28 addresses taken from the public trade stream (`userFills`), each compared with that user's `userFees` tier: the charged fee is **0.2 × the user's tier rate**. Tier-0 takers paid **0.0090%** per fill (0.00864% with the referral discount), every month Sep–Nov 2026 (437 fills). Jul–Aug was not observed.
+- 0.2× fits "HIP-3 fee 2× base, growth mode −90%", but that explanation is **inferred**, not read from documentation.
+**Decision.** Baseline taker fee = 0.0090% per fill, provenance `OBSERVED`. It is still charged on targets too (no maker rebate assumed). Scenarios 0.0045%, 0.045%, 0.09% (growth mode off, inferred) and 0.10% (old assumption) are in every report. Slippage stays at the conservative 0.05% per side and is now the largest cost.
+
+## ADR-029 — The holdout of the current dataset is exposed (2026-11-04, research audit)
+- In the first PR #3 runs, rolling walk-forward folds covered the whole history, so the last folds **selected parameters on data inside the 70/15/15 holdout** (2026-10-19 → 2026-11-04). Holdout results were also reported (runs 1–6).
+- Fix: walk-forward now ends at the holdout start (`until`); every train window, test window and parameter selection lies in development + validation. Tested by spying on every selection run.
+- The dev-only optimisation never touched the holdout (re-verified).
+- Even so, the holdout of this dataset has been **seen**. `Protocol.exposed_until = 2026-11-04T08:00Z` records it. The report field `independent_test` is `NONE`, and the new verdict criterion `holdout_untouched` makes PASS impossible until a holdout starts after that instant. **There is currently no untouched independent test**; only forward data after 2026-11-04 08:00 UTC can provide one.
+- Re-runs for comparison use `autotrader backtest --as-of 2026-11-04T08:00:05Z` (same data fingerprint `f869a045…`), so the never-seen data stays unused.
+
+## ADR-030 — xyz:CL trades 24/7; the CME calendar is only a strategy filter (2026-11-04, research audit)
+- Observed: every one of the 5,000 30m bars (and 5,000 1h bars) has trades, with at least 31 trades per 30m bar, including all weekends and CME holidays. There are no gaps.
+- While CME is closed, median 30m volume is ≈5.6× lower (6,994 vs 39,253) and there are ≈2.3× fewer trades. That is the basis for the entry filter and for the 2× off-hours spread/slippage assumption.
+- The engine never blocks exits on CME hours. Entry blocks are categorised (`STRATEGY_FILTER`, `RISK`, `DATA`, `MARKET`, `SIMULATION`); CME-based codes are `STRATEGY_FILTER`, not "market closed". Reports include a `market_hours` section computed from the data.

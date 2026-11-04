@@ -47,7 +47,10 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "N", "SIM", "RUF"]
 ignore = ["S101"]  # assert is fine in tests
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "N802"]
+"tests/**" = ["S", "N802", "RUF001"]
+# Hebrew UI text uses the multiplication sign (×) and en dashes on purpose.
+"src/autotrader/strategy/strategies.py" = ["RUF001"]
+"src/autotrader/backtest/research.py" = ["RUF001"]
 # Migrations interpolate module-level constants (table/role names), never input.
 "src/autotrader/db/migrations/**" = ["N", "E501", "S608"]
 

@@ -167,3 +167,8 @@ body {
 .tbl th, .tbl td { padding: 0.35rem 0.5rem; text-align: start; border-bottom: 1px solid var(--border); }
 .tbl th { color: var(--muted); font-weight: 600; }
 .tbl td.detail { white-space: normal; min-width: 16rem; max-width: 32rem; }
+
+/* ------------------------------------------------------------------ Phase 2 UI */
+.chart-box-sm { width: 100%; height: 220px; }
+@media (min-width: 640px) { .chart-box-sm { height: 300px; } }
+.badge-bad { color: var(--bad); }

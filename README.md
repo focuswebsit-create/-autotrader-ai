@@ -5,7 +5,7 @@ Research and **paper-trading** (simulation) system for Hyperliquid's HIP-3 WTI o
 > ⚠️ **PAPER / NO REAL MONEY.** This system reads public mainnet market data only. It has no wallet, accepts no private keys, and can't send orders: the authenticated `/exchange` endpoint is blocked in code and by tests.
 
 Specification: [`PROJECT_BLUEPRINT.md`](PROJECT_BLUEPRINT.md) · Working rules: [`CLAUDE_MASTER_PROMPT.md`](CLAUDE_MASTER_PROMPT.md)
-Status: [`docs/STATUS.md`](docs/STATUS.md) · Decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) · Evidence: [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)
+Phase 2 results: [`docs/PHASE2_REPORT.md`] (Backtest Lab at http://localhost:3000/backtest) · Status: [`docs/STATUS.md`](docs/STATUS.md) · Decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) · Evidence: [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)
 
 ## Layout
 
@@ -18,7 +18,9 @@ src/autotrader/
   ingest/     REST backfill/sync + live WS collector (Phase 1)
   worker/     discovery job
   reporting/  data coverage report
-  strategy/ risk/ paper/ backtest/ reporting/   (later phases)
+  strategy/   indicators, CME session calendar, 3 deterministic strategies (Phase 2)
+  backtest/   engine, costs, audit, metrics, research protocol, storage (Phase 2)
+  risk/ paper/   (Phase 3)
 apps/web/     Next.js Hebrew RTL dashboard
 infra/docker/ Dockerfiles
 infra/db/     least-privilege DB users (roles.sql)
@@ -68,6 +70,14 @@ uv run autotrader collect         # live collector: discovery, backfill, WS stre
 
 ```bash
 uv run autotrader data-report     # coverage, gaps and data-quality issues (JSON)
+```
+
+```bash
+uv run autotrader funding-sync    # recorded hourly funding (fundingHistory, read-only)
+```
+
+```bash
+uv run autotrader backtest        # Phase 2 research protocol for all strategies -> backtest_runs
 ```
 
 ```bash
