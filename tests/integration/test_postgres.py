@@ -616,9 +616,17 @@ def _forward_test_row(c: Any, starts: str = "2026-11-05T00:00:00Z") -> int:
     )
 
 
+def _without_wallclock_guard(c: Any) -> None:
+    """Owner-only: lets a test insert fixed historical timestamps (the guard is tested
+    separately in test_forward_journal_accepts_only_real_time_writes)."""
+    for table in ("forward_tests", "forward_decisions"):
+        c.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER trg_{table}_wallclock"))
+
+
 def test_forward_journal_is_immutable_and_starts_after_freeze(migrated: str) -> None:
     engine = create_engine(migrated)
     with engine.begin() as c:
+        _without_wallclock_guard(c)
         tid = _forward_test_row(c)
         c.execute(
             text(
@@ -663,6 +671,45 @@ def test_forward_journal_is_immutable_and_starts_after_freeze(migrated: str) -> 
     # a test can't start in the past relative to its creation
     with pytest.raises(DBAPIError), engine.begin() as c:
         _forward_test_row(c, starts="2026-11-04T20:00:00Z")
+
+
+def test_forward_journal_accepts_only_real_time_writes(migrated: str) -> None:
+    """A historical replay can't be written into the forward journal: tests and decisions
+    must carry the real current time (+-5 min of the DB clock)."""
+    engine = create_engine(migrated)
+    insert_test = (
+        "INSERT INTO forward_tests (coin, strategy_id, strategy_version, params_hash, code_hash, "
+        "code_version, config, config_sha256, history_anchor, starts_at, created_at) VALUES "
+        "('xyz:CL','ema_rsi','1.0.0',:h,:h,'t','{}'::jsonb,:h,'2026-07-23T00:00:00Z', "
+        ":created, :created) RETURNING id"
+    )
+    with pytest.raises(DBAPIError, match="real time"), engine.begin() as c:
+        c.execute(text(insert_test), {"h": "a" * 64, "created": "2026-10-01T00:00:00Z"})
+    with engine.begin() as c:
+        now = c.execute(text("SELECT now() - interval '1 minute'")).scalar_one()
+        start = c.execute(text("SELECT now() - interval '50 minutes'")).scalar_one()
+        # freeze "now" (starts_at is not checked by this guard, created_at is)
+        c.execute(text("ALTER TABLE forward_tests DISABLE TRIGGER trg_forward_tests_wallclock"))
+        tid = c.execute(
+            text(insert_test.replace(":created, :created", ":start, :start")),
+            {"h": "a" * 64, "start": start},
+        ).scalar_one()
+        c.execute(text("ALTER TABLE forward_tests ENABLE TRIGGER trg_forward_tests_wallclock"))
+    insert_decision = (
+        "INSERT INTO forward_decisions (test_id, bar_open_time, bar_close_time, evaluated_at, "
+        "late, reason, rationale, market, strategy_version, params_hash, code_hash, "
+        "input_digest) VALUES (:t, :o, :c, :e, false, 'NO_SETUP', '{}', '{}', '1', :h, :h, :h)"
+    )
+    bar_open = start
+    bar_close = c_close = start + __import__("datetime").timedelta(minutes=30)
+    # replayed decision: evaluated "back then" -> rejected
+    with pytest.raises(DBAPIError, match="real time"), engine.begin() as c:
+        c.execute(text(insert_decision), {"t": tid, "o": bar_open, "c": bar_close,
+                                          "e": c_close, "h": "a" * 64})  # fmt: skip
+    # the same decision made now (late catch-up after an outage) -> accepted
+    with engine.begin() as c:
+        c.execute(text(insert_decision), {"t": tid, "o": bar_open, "c": bar_close, "e": now,
+                                          "h": "a" * 64})  # fmt: skip
 
 
 def test_forward_and_backtest_tables_cannot_be_truncated(migrated: str) -> None:

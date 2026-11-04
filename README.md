@@ -5,7 +5,7 @@ Research and **paper-trading** (simulation) system for Hyperliquid's HIP-3 WTI o
 > ⚠️ **PAPER / NO REAL MONEY.** This system reads public mainnet market data only. It has no wallet, accepts no private keys, and can't send orders: the authenticated `/exchange` endpoint is blocked in code and by tests.
 
 Specification: [`PROJECT_BLUEPRINT.md`](PROJECT_BLUEPRINT.md) · Working rules: [`CLAUDE_MASTER_PROMPT.md`](CLAUDE_MASTER_PROMPT.md)
-Phase 2 results: [`docs/PHASE2_REPORT.md`] (Backtest Lab at http://localhost:3000/backtest) · Phase 2.5: [`docs/PHASE2_5_REPORT.md`] (http://localhost:3000/forward) · Status: [`docs/STATUS.md`](docs/STATUS.md) · Decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) · Evidence: [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)
+Phase 2 results: [`docs/PHASE2_REPORT.md`] (Backtest Lab at http://localhost:3000/backtest) · Phase 2.5: [`docs/PHASE2_5_REPORT.md`] (http://localhost:3000/forward) · Deployment plan: [`docs/DEPLOYMENT.md`] · Status: [`docs/STATUS.md`](docs/STATUS.md) · Decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) · Evidence: [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md)
 
 ## Layout
 

@@ -212,7 +212,12 @@ def evaluate(session: Session, test: ForwardTest, *, now: datetime) -> dict[str,
             "observed_days": round(observed_days, 2),
             "decisions": len(rows),
             "signals": sum(1 for r in rows if r.side),
+            # every decision is LIVE (written in real time, DB-enforced); "late" ones were
+            # made after a delay (worker/collector outage) but still only from closed bars
+            "data_origin": "LIVE_FORWARD",
+            "realtime_decisions": sum(1 for r in rows if not r.late),
             "late_decisions": sum(1 for r in rows if r.late),
+            "first_decision_evaluated_at": _utc(rows[0].evaluated_at).isoformat() if rows else None,
             "last_decision_bar": last_rec.isoformat() if last_rec else None,
             "last_closed_bar": m30[-1].close_time.isoformat() if m30 else None,
             "data_stale": bool(m30) and now - m30[-1].close_time > STALE_AFTER,

@@ -7,15 +7,21 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Path, Query
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException, Path, Query, Response
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from autotrader.api.market_data import collector_status
 from autotrader.common.config import Settings
+from autotrader.db.market_data import get_heartbeat
 from autotrader.db.models import ForwardDecision, ForwardTest
 from autotrader.forward.evaluate import _decision_json, evaluate
 from autotrader.forward.recorder import test_state
+from autotrader.forward.worker import SERVICE_NAME as FORWARD_SERVICE
+
+#: worker ticks every 30 s; older than this = down
+FORWARD_HEARTBEAT_MAX_S = 180
 
 
 def build_forward_router(
@@ -36,6 +42,80 @@ def build_forward_router(
         if t is None or t.coin != settings.market_coin:
             raise HTTPException(status_code=404, detail="FORWARD_TEST_NOT_FOUND")
         return t
+
+    @router.get("/health")
+    def health(response: Response) -> dict[str, Any]:
+        """One endpoint for uptime monitoring of the whole forward pipeline.
+
+        503 + alerts when: DB down, collector not running / WS down / data stale,
+        forward worker heartbeat stale, a test halted, or recording lags the data.
+        """
+        now = clock()
+        alerts: list[dict[str, str]] = []
+        try:
+            with _sessions()() as s:
+                collector = collector_status(s, settings.market_coin, now)
+                hb = get_heartbeat(s, FORWARD_SERVICE)
+                tests = list(
+                    s.scalars(select(ForwardTest).where(ForwardTest.coin == settings.market_coin))
+                )
+                states = {t.id: test_state(s, t.id) for t in tests}
+                lags: dict[int, float] = {}
+                last_closed = next(
+                    (
+                        i.get("last_closed_open_time")
+                        for i in collector.get("intervals", [])
+                        if i.get("interval") == "30m"
+                    ),
+                    None,
+                )
+                for t in tests:
+                    if states[t.id] != "ACTIVE":
+                        continue
+                    last = s.scalar(
+                        select(func.max(ForwardDecision.bar_close_time)).where(
+                            ForwardDecision.test_id == t.id
+                        )
+                    )
+                    ref = max(t.starts_at, last) if last else t.starts_at
+                    lags[t.id] = (now - ref.astimezone(UTC)).total_seconds() / 60
+        except SQLAlchemyError:
+            response.status_code = 503
+            return {"status": "DOWN", "alerts": [{"code": "DATABASE_UNAVAILABLE"}]}
+        for a in collector.get("alerts", []):
+            alerts.append({"code": f"COLLECTOR:{a.get('code')}", "severity": a.get("severity", "")})
+        if hb is None:
+            alerts.append({"code": "FORWARD_WORKER_NOT_STARTED", "severity": "ERROR"})
+        else:
+            age = (now - hb.last_heartbeat_at.astimezone(UTC)).total_seconds()
+            if hb.state == "STOPPED" or age > FORWARD_HEARTBEAT_MAX_S:
+                alerts.append({"code": "FORWARD_WORKER_DOWN", "severity": "ERROR"})
+        for tid, st in states.items():
+            if st == "INTEGRITY_HALT":
+                alerts.append({"code": f"FORWARD_TEST_{tid}_INTEGRITY_HALT", "severity": "ERROR"})
+        for tid, minutes in lags.items():
+            # a decided bar closes every 30 min: > 75 min since the last one = not recording
+            if minutes > 75:
+                alerts.append({"code": f"FORWARD_TEST_{tid}_NOT_RECORDING", "severity": "ERROR"})
+        errors = [a for a in alerts if a["severity"] == "ERROR"]
+        if errors:
+            response.status_code = 503
+        return {
+            "status": "DOWN" if errors else ("DEGRADED" if alerts else "OK"),
+            "time": now.isoformat(),
+            "alerts": alerts,
+            "forward_worker": None
+            if hb is None
+            else {
+                "state": hb.state,
+                "last_heartbeat_at": hb.last_heartbeat_at.astimezone(UTC).isoformat(),
+                "details": hb.details,
+            },
+            "tests": {str(k): v for k, v in states.items()},
+            "minutes_since_last_decided_bar": {str(k): round(v, 1) for k, v in lags.items()},
+            "last_closed_30m_open_time": last_closed,
+            "paper_only": True,
+        }
 
     @router.get("/tests")
     def tests() -> dict[str, Any]:

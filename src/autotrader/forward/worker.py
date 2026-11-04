@@ -22,6 +22,7 @@ from autotrader.ingest.funding import sync_funding
 
 log = logging.getLogger("autotrader.forward.worker")
 
+SERVICE_NAME = "forward-worker"
 TICK_EVERY_S = 30
 #: frequent, so recorded funding for recent hours lands soon (results depend on it)
 FUNDING_EVERY = timedelta(minutes=10)
@@ -64,6 +65,8 @@ def run_forever(
         signal.signal(signal.SIGTERM, _sig)
         signal.signal(signal.SIGINT, _sig)
     last_funding: datetime | None = None
+    started = clock()
+    _heartbeat(sessions, "STARTING", started, started, {})
     while not stop.is_set():
         now = clock()
         if info_source is not None and (
@@ -75,8 +78,10 @@ def run_forever(
                 last_funding = now
             except Exception:
                 log.exception("funding sync failed")
+        results: list[TickResult] = []
         try:
-            for r in tick_all(sessions, coin, now):
+            results = tick_all(sessions, coin, now)
+            for r in results:
                 if r.recorded or r.notes:
                     log.info(
                         "forward tick",
@@ -90,4 +95,43 @@ def run_forever(
                     )
         except SQLAlchemyError:
             log.exception("forward tick failed (database)")
+        _heartbeat(
+            sessions,
+            "RUNNING",
+            started,
+            now,
+            {
+                "active_tests": len(results),
+                "recorded_last_cycle": sum(r.recorded for r in results),
+                "halted": [r.test_id for r in results if r.state != "ACTIVE"],
+                "notes": sorted({n for r in results for n in r.notes})[:5],
+                "last_funding_sync": last_funding.isoformat() if last_funding else None,
+            },
+        )
         stop.wait(TICK_EVERY_S)
+    _heartbeat(sessions, "STOPPED", started, clock(), {})
+
+
+def _heartbeat(
+    sessions: sessionmaker[Session],
+    state: str,
+    started: datetime,
+    now: datetime,
+    details: dict[str, Any],
+) -> None:
+    """Liveness for monitoring (/api/forward/health). Never blocks recording."""
+    from autotrader.db.market_data import write_heartbeat
+
+    try:
+        with sessions.begin() as s:
+            write_heartbeat(
+                s,
+                SERVICE_NAME,
+                state=state,
+                ws_state="NOT_APPLICABLE",
+                started_at=started,
+                last_heartbeat_at=now,
+                details=details,
+            )
+    except Exception:
+        log.exception("forward heartbeat failed")

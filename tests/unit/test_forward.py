@@ -458,11 +458,13 @@ def test_worker_records_for_active_tests_and_survives_funding_errors(
             raise RuntimeError("network down")
 
     stop = threading.Event()
-    times = iter([FREEZE_AT + timedelta(hours=6)])
+    calls = {"n": 0}
 
     def clock() -> datetime:
-        stop.set()  # one loop iteration only
-        return next(times)
+        calls["n"] += 1  # 1 = start-up, 2 = the single loop iteration
+        if calls["n"] >= 2:
+            stop.set()
+        return FREEZE_AT + timedelta(hours=6)
 
     run_forever(sessions, COIN, Boom(), clock=clock, stop=stop)
     assert Boom.calls == 1  # funding failure logged, recording continued
@@ -591,3 +593,49 @@ def test_code_hash_covers_evaluation_code() -> None:
     for f in ("forward/evaluate.py", "backtest/validation.py", "forward/freeze.py",
               "market/models.py", "db/market_data.py"):  # fmt: skip
         assert f in CODE_FILES
+
+
+# --------------------------------------------------------------------------- monitoring
+
+
+def test_worker_heartbeat_and_pipeline_health(db: sessionmaker[Session], tmp_path: Path) -> None:
+    import threading
+
+    from autotrader.db.market_data import get_heartbeat
+    from autotrader.forward.worker import SERVICE_NAME, run_forever
+    from tests.conftest import Clock
+
+    sessions = _fresh_copy(db, tmp_path)
+    with sessions.begin() as s:
+        tid = rec.create_test(s, COIN, "ema_rsi", now=FREEZE_AT, code_version="t").id
+    app = create_app(
+        Settings(database_url=None), sessions, clock=Clock(FREEZE_AT + timedelta(hours=3))
+    )
+    c = TestClient(app)
+    h = c.get("/api/forward/health")
+    assert h.status_code == 503
+    codes = {a["code"] for a in h.json()["alerts"]}
+    assert "FORWARD_WORKER_NOT_STARTED" in codes
+    assert f"FORWARD_TEST_{tid}_NOT_RECORDING" in codes  # started 09:30, nothing recorded
+
+    stop = threading.Event()
+    calls = {"n": 0}
+
+    def clock() -> datetime:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            stop.set()
+        return FREEZE_AT + timedelta(hours=3)
+
+    run_forever(sessions, COIN, None, clock=clock, stop=stop)
+    with sessions() as s:
+        hb = get_heartbeat(s, SERVICE_NAME)
+        assert hb is not None and hb.state == "STOPPED" and hb.ws_state == "NOT_APPLICABLE"
+    rep = c.get(f"/api/forward/tests/{tid}").json()
+    assert rep["progress"]["data_origin"] == "LIVE_FORWARD"
+    assert rep["progress"]["realtime_decisions"] + rep["progress"]["late_decisions"] == 5
+    h2 = c.get("/api/forward/health").json()
+    codes2 = {a["code"] for a in h2["alerts"]}
+    assert "FORWARD_WORKER_DOWN" in codes2  # stopped worker is reported, not hidden
+    assert f"FORWARD_TEST_{tid}_NOT_RECORDING" not in codes2
+    assert h2["paper_only"] is True

@@ -293,7 +293,7 @@ class ServiceHeartbeat(Base):
             "state IN ('STARTING','RUNNING','DEGRADED','STOPPED')", name="ck_heartbeat_state"
         ),
         CheckConstraint(
-            "ws_state IN ('DISCONNECTED','CONNECTING','CONNECTED','STALE')",
+            "ws_state IN ('DISCONNECTED','CONNECTING','CONNECTED','STALE','NOT_APPLICABLE')",
             name="ck_heartbeat_ws_state",
         ),
     )

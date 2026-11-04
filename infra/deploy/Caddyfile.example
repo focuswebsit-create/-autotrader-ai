@@ -1,0 +1,16 @@
+# OPTIONAL public access (prefer Tailscale with no public ports at all).
+# Replace the domain and generate the hash with:  caddy hash-password
+# Only GET reaches the app; the dashboard has no write endpoints anyway (PAPER-ONLY).
+autotrader.example.com {
+	encode zstd gzip
+	basic_auth {
+		owner $2a$14$REPLACE_WITH_BCRYPT_HASH
+	}
+	@notget not method GET HEAD
+	respond @notget 405
+	reverse_proxy 127.0.0.1:3000
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Robots-Tag "noindex, nofollow"
+	}
+}
