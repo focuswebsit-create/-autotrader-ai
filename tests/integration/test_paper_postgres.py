@@ -120,6 +120,7 @@ def logins(migrated: str) -> dict[str, sessionmaker[Session]]:  # noqa: F811
     with eng.begin() as c:
         for login, group in (("autotrader_api", "autotrader_reader"),
                              ("autotrader_worker", "autotrader_writer"),
+                             ("autotrader_paper", "autotrader_trader"),
                              ("autotrader_control", "autotrader_controller")):  # fmt: skip
             if not c.execute(text("SELECT 1 FROM pg_roles WHERE rolname=:r"), {"r": login}).first():
                 c.execute(text(f"CREATE ROLE {login} LOGIN"))
@@ -131,6 +132,7 @@ def logins(migrated: str) -> dict[str, sessionmaker[Session]]:  # noqa: F811
         for k, r in (
             ("api", "autotrader_api"),
             ("worker", "autotrader_worker"),
+            ("paper", "autotrader_paper"),
             ("control", "autotrader_control"),
         )
     }
@@ -231,6 +233,73 @@ def test_retroactive_rows_are_refused(world: World) -> None:
     assert w.state().state == "RUNNING"
 
 
+def test_all_paper_history_is_real_time(world: World) -> None:
+    """Review finding: positions / closes / snapshots / risk events had no wall-clock
+    guard, so a backdated opened_at could dodge the DB's daily entry cap."""
+    w = world
+    old = _now() - timedelta(hours=3)
+    assert _err(w.sessions,
+                "INSERT INTO paper_risk_events (account_id, kind, occurred_at, detail) "
+                "VALUES (:a, 'X', :t, '{}')", {"a": w.acc_id, "t": old})  # fmt: skip
+    assert _err(w.sessions,
+                "INSERT INTO paper_equity_snapshots (account_id, at, cash, unrealized, equity) "
+                "VALUES (:a, :t, 1000, 0, 1000)", {"a": w.acc_id, "t": old})  # fmt: skip
+    slot = _now() - timedelta(minutes=4, seconds=59)  # a 5-minute slot start is fine
+    snap = ("INSERT INTO paper_equity_snapshots (account_id, at, cash, unrealized, equity) "
+            "VALUES (:a, :t, 1000, 0, 1000)")  # fmt: skip
+    assert not _err(w.sessions, snap, {"a": w.acc_id, "t": slot})
+    for t in ("paper_positions", "paper_position_closes"):
+        with w.sessions() as s:
+            trig = s.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgname = :n"),
+                            {"n": f"trg_{t}_wallclock"})  # fmt: skip
+        assert trig == 1, t
+
+
+def test_concurrent_commands_from_two_tabs_create_one(
+    world: World, logins: dict[str, sessionmaker[Session]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding: the COMMAND_PENDING check raced. A delay inside the check widens
+    the race window; the per-account advisory lock must still let only one through."""
+    import threading
+    import time
+
+    w = world
+    real = engine.pending_commands
+
+    def slow(s: Session, acc_id: int) -> list[PaperCommand]:
+        out = real(s, acc_id)
+        time.sleep(0.3)
+        return out
+
+    monkeypatch.setattr(engine, "pending_commands", slow)
+    with w.sessions.begin() as s:
+        auth.create_user(s, "owner", "correct horse battery", "ADMIN", _now())
+    app = create_control_app(Settings(), logins["control"], secret=SECRET,
+                             allowed_origins=(ORIGIN,), cookie_secure=False)  # fmt: skip
+    first = TestClient(app)
+    r = first.post(
+        "/control/login", json={"username": "owner", "password": "correct horse battery"}
+    )
+    csrf = r.json()["csrf_token"]
+    codes: list[int] = []
+    barrier = threading.Barrier(4)
+
+    def go(i: int) -> None:
+        c = TestClient(app, cookies={auth.COOKIE_NAME: first.cookies[auth.COOKIE_NAME]})
+        barrier.wait()
+        res = c.post("/control/bot/kill", json={"idempotency_key": f"tab-{i}-kill-key"},
+                     headers={"origin": ORIGIN, "x-csrf-token": csrf})  # fmt: skip
+        codes.append(res.status_code)
+
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(codes) == [200, 409, 409, 409], codes
+    assert w.count(PaperCommand) == 1
+
+
 def test_auth_sessions_can_only_be_revoked_once(world: World) -> None:
     w = world
     now = _now()
@@ -285,6 +354,19 @@ def test_worker_and_reader_roles(world: World, logins: dict[str, sessionmaker[Se
     assert _err(logins["api"], "INSERT INTO paper_commands (account_id, command, requested_by, "
                 "reason, idempotency_key, requested_at) VALUES (1,'START','a','a','api-k-01',"
                 "now())")  # fmt: skip
+    # the collector's role reads PAPER rows but can never write them (only the paper-trader)
+    for sql in (
+        "INSERT INTO paper_bot_events (account_id, state, reason, occurred_at, detail) "
+        "VALUES (:a, 'RUNNING', 'FORGED', now(), '{}')",
+        "INSERT INTO paper_ledger (account_id, kind, amount, ref, occurred_at, detail) "
+        "VALUES (:a, 'DEPOSIT', 5, 'forged:1', now(), '{}')",
+    ):
+        assert _err(logins["worker"], sql, {"a": w.acc_id}), sql
+    with logins["worker"]() as s:
+        assert s.scalar(text("SELECT count(*) FROM paper_ledger")) == 1
+    with logins["paper"]() as s:  # the paper role keeps the writer rights it needs
+        assert s.scalar(text("SELECT has_table_privilege('autotrader_paper', 'funding_rates', "
+                             "'INSERT')"))  # fmt: skip
     with logins["api"]() as s:
         assert s.scalar(text("SELECT count(*) FROM paper_ledger")) == 1
     assert _err(logins["api"], "SELECT count(*) FROM auth_sessions")  # tokens hashes stay private
@@ -328,13 +410,13 @@ def test_control_api_and_worker_end_to_end_with_least_privilege_roles(
     now = _now()
     with w.sessions.begin() as s:
         collector_ok(s, now)
-    out = worker.run_once(logins["worker"], COIN, None, now, book=book(now, "80.00", "80.02"))
+    out = worker.run_once(logins["paper"], COIN, None, now, book=book(now, "80.00", "80.02"))
     assert out["states"][str(w.acc_id)] == "RUNNING", w.state().detail
     r3 = client.post("/control/bot/start", json={"idempotency_key": "e2e-start-3"}, headers=hdr)
     assert r3.status_code == 409 and r3.json()["detail"] == "NOT_ALLOWED_FROM_RUNNING"
     r4 = client.post("/control/bot/kill", json={"idempotency_key": "e2e-kill-01"}, headers=hdr)
     assert r4.status_code == 200
-    worker.run_once(logins["worker"], COIN, None, _now(), book=book(_now(), "80.00", "80.02"))
+    worker.run_once(logins["paper"], COIN, None, _now(), book=book(_now(), "80.00", "80.02"))
     assert w.state().state == "HALTED" and w.state().reason == "KILL_SWITCH"
     with w.sessions() as s:
         actions = s.scalars(select(AuditLog.action).order_by(AuditLog.id)).all()

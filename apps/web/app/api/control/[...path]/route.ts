@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 const BASE = process.env.CONTROL_BASE_URL ?? "http://localhost:8001";
 const COOKIE = "at_session";
 const MAX_BODY = 4096;
+const TRUST_PROXY = process.env.TRUST_PROXY_XFF === "1";
 
 const GET_PATHS = new Set(["me", "health"]);
 const POST_PATHS = new Set(["login", "logout"]);
@@ -31,8 +32,13 @@ async function forward(req: NextRequest, joined: string, method: "GET" | "POST")
   if (origin) headers.origin = origin;
   const csrf = req.headers.get("x-csrf-token");
   if (csrf && /^[0-9a-f]{64}$/.test(csrf)) headers["x-csrf-token"] = csrf;
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) headers["x-forwarded-for"] = xff.split(",")[0].trim().slice(0, 64);
+  // Client IP for the per-client login limits: only when a trusted reverse proxy in
+  // front of this server (Caddy / Tailscale Serve) sets X-Forwarded-For. Its LAST entry
+  // is the address that proxy saw; earlier entries are client-controlled.
+  if (TRUST_PROXY) {
+    const last = (req.headers.get("x-forwarded-for") ?? "").split(",").pop()?.trim();
+    if (last && /^[0-9a-fA-F:.]{2,45}$/.test(last)) headers["x-forwarded-for"] = last;
+  }
   let body: string | undefined;
   if (method === "POST") {
     if (!(req.headers.get("content-type") ?? "").startsWith("application/json")) {

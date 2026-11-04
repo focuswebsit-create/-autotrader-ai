@@ -5,7 +5,8 @@
 #   migrate   -> owner (schema changes only)
 #   api       -> autotrader_api    (SELECT only)
 #   collector -> autotrader_worker (INSERT/UPDATE on market-data tables; no DELETE/DDL)
-#   paper-trader -> autotrader_worker (INSERT on paper tables; the only writer of PAPER fills)
+#   paper-trader -> autotrader_paper  (role autotrader_trader: INSERT on paper tables, plus the
+#                                      worker rights for funding sync; the only PAPER writer)
 #   control   -> autotrader_control (INSERT paper_commands / audit_log / auth sessions only)
 services:
   db:
@@ -17,6 +18,7 @@ services:
       AUTOTRADER_API_DB_PASSWORD: ${AUTOTRADER_API_DB_PASSWORD:-api-local-only}
       AUTOTRADER_WORKER_DB_PASSWORD: ${AUTOTRADER_WORKER_DB_PASSWORD:-worker-local-only}
       AUTOTRADER_CONTROL_DB_PASSWORD: ${AUTOTRADER_CONTROL_DB_PASSWORD:-control-local-only}
+      AUTOTRADER_PAPER_DB_PASSWORD: ${AUTOTRADER_PAPER_DB_PASSWORD:-paper-local-only}
     ports: ["127.0.0.1:5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -81,7 +83,7 @@ services:
     build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
     environment:
       <<: *backend_env
-      AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader_worker:${AUTOTRADER_WORKER_DB_PASSWORD:-worker-local-only}@db:5432/${POSTGRES_DB:-autotrader}
+      AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader_paper:${AUTOTRADER_PAPER_DB_PASSWORD:-paper-local-only}@db:5432/${POSTGRES_DB:-autotrader}
     # Phase 3: virtual (PAPER) execution on the live public order book. One instance per
     # database (advisory lock). It starts in the state it was left in; a RUNNING bot
     # re-runs its pre-flight checks before trading again. No exchange endpoint exists.
@@ -102,9 +104,15 @@ services:
       AUTOTRADER_CORS_ORIGINS: ${AUTOTRADER_PUBLIC_ORIGINS:-http://localhost:3000}
     # Authenticated owner commands (start / stop / kill ...). Reached only through the
     # web server (server-side proxy); never published on the host.
+    # X-Forwarded-For is trusted only from the web server's fixed address on the private
+    # "control" network (the web proxy forwards it only when TRUST_PROXY_XFF=1).
     command: ["uvicorn", "autotrader.control.main:app", "--host", "0.0.0.0", "--port", "8001",
-              "--proxy-headers", "--forwarded-allow-ips", "*"]
+              "--proxy-headers", "--forwarded-allow-ips", "172.29.240.3"]
     expose: ["8001"]
+    networks:
+      default: {}
+      control:
+        aliases: [control-internal]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/control/health', timeout=4).status == 200 else 1)"]
@@ -117,12 +125,24 @@ services:
     build: { context: ., dockerfile: infra/docker/web.Dockerfile }
     environment:
       API_BASE_URL: http://api:8000
-      CONTROL_BASE_URL: http://control:8001
+      CONTROL_BASE_URL: http://control-internal:8001
+      # set to 1 only when a reverse proxy you run (Caddy / Tailscale Serve) is the only way in
+      TRUST_PROXY_XFF: ${TRUST_PROXY_XFF:-0}
+    networks:
+      default: {}
+      control:
+        ipv4_address: 172.29.240.3
     ports: ["127.0.0.1:3000:3000"]
     restart: unless-stopped
     depends_on:
       api: { condition: service_healthy }
       control: { condition: service_healthy }
+
+networks:
+  control:
+    ipam:
+      config:
+        - subnet: 172.29.240.0/29
 
 volumes:
   pgdata:

@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -32,6 +32,8 @@ from autotrader.db.models import AuditLog, AuthSession, AuthUser, PaperAccount, 
 from autotrader.db.session import session_factory
 from autotrader.paper import engine
 
+#: pg_advisory_xact_lock(key, account_id) namespace for command decisions ("CTRL")
+CONTROL_LOCK_KEY = 0x4354524C
 COMMANDS: dict[str, str] = {
     "start": "START",
     "stop": "STOP",
@@ -244,6 +246,10 @@ def create_control_app(
                 acc = s.scalar(select(PaperAccount).where(PaperAccount.name == body.account))
                 if acc is None:
                     raise HTTPException(status_code=404, detail="ACCOUNT_NOT_FOUND")
+                if s.get_bind().dialect.name == "postgresql":
+                    # one command decision at a time per account (two tabs, two keys)
+                    s.execute(text("SELECT pg_advisory_xact_lock(:k, :a)"),
+                              {"k": CONTROL_LOCK_KEY, "a": acc.id})  # fmt: skip
                 existing = s.scalar(
                     select(PaperCommand).where(PaperCommand.idempotency_key == body.idempotency_key)
                 )
@@ -252,16 +258,7 @@ def create_control_app(
                         raise HTTPException(status_code=409, detail="IDEMPOTENCY_KEY_REUSED")
                     return {"command_id": existing.id, "command": cmd, "duplicate": True}
                 state = engine.current_state(s, acc.id).state
-                pending = s.scalar(
-                    select(PaperCommand)
-                    .where(
-                        PaperCommand.account_id == acc.id,
-                        PaperCommand.id > (engine_last_command(s, acc.id) or 0),
-                    )
-                    .order_by(PaperCommand.id.desc())
-                    .limit(1)
-                )
-                if pending is not None:
+                if engine.pending_commands(s, acc.id):
                     raise HTTPException(status_code=409, detail="COMMAND_PENDING")
                 if state not in ALLOWED_FROM[cmd]:
                     raise HTTPException(status_code=409, detail=f"NOT_ALLOWED_FROM_{state}")
@@ -297,14 +294,3 @@ def create_control_app(
             raise HTTPException(status_code=503, detail="DATABASE_UNAVAILABLE") from exc
 
     return app
-
-
-def engine_last_command(s: Session, acc_id: int) -> int | None:
-    """Highest command id the worker has already processed."""
-    from sqlalchemy import func
-
-    from autotrader.db.models import PaperBotEvent
-
-    return s.scalar(
-        select(func.max(PaperBotEvent.command_id)).where(PaperBotEvent.account_id == acc_id)
-    )

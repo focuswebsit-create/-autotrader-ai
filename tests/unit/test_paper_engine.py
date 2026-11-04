@@ -408,6 +408,71 @@ def test_drawdown_halt(env: Any) -> None:
         assert ev.state == "HALTED" and ev.reason == "DRAWDOWN_HALT"
 
 
+def test_drawdown_halt_can_be_reset_and_rebases_the_limit(env: Any) -> None:
+    """Review finding: the high-water mark never reset, so RESET_HALT after a drawdown
+    halt was immediately undone on the same tick."""
+    sessions, acc_id, now = _open_long(env)
+    with sessions() as s:
+        pos = engine.open_position(s, acc_id)
+    low = pos.stop + D("0.01")
+    cfg = PaperConfig()
+    object.__setattr__(cfg.risk, "drawdown_halt_pct", D("0.1"))
+    t = now + timedelta(seconds=10)
+    with sessions.begin() as s:
+        acc = s.get(engine.PaperAccount, acc_id)
+        engine.risk_monitors(s, acc, cfg, engine.Market(now=t, book=book(t, low, low + D("0.02"))))
+    command(sessions, acc_id, "RESET_HALT", t + timedelta(seconds=5), "reset-dd-1")
+    t2 = t + timedelta(seconds=6)
+    with sessions.begin() as s:
+        acc = s.get(engine.PaperAccount, acc_id)
+        m = engine.Market(now=t2, book=book(t2, low, low + D("0.02")))
+        engine.apply_commands(s, acc, cfg, m)
+        engine.risk_monitors(s, acc, cfg, m)  # same tick: must not halt again
+    with sessions() as s:
+        ev = engine.current_state(s, acc_id)
+        assert ev.state == "STOPPED" and ev.reason == "HALT_RESET"
+        acc = s.get(engine.PaperAccount, acc_id)
+        assert engine.high_water(s, acc) > engine.high_water(s, acc, since_reset=True)
+
+
+def test_a_late_committed_command_is_never_skipped(env: Any) -> None:
+    """Review finding: commands were selected by id > max(handled id); a command that
+    commits late with a lower id (two browser tabs) was skipped forever."""
+    from autotrader.db.models import PaperBotEvent, PaperCommand
+
+    sessions, acc_id, _ = env
+    command(sessions, acc_id, "PAUSE", T0, "late-low-id")
+    command(sessions, acc_id, "KILL", T0, "early-high-id")
+    with sessions.begin() as s:
+        acc = s.get(engine.PaperAccount, acc_id)
+        kill = s.scalar(select(PaperCommand).where(PaperCommand.command == "KILL"))
+        engine._apply(s, acc, PaperConfig(), engine.Market(now=T0, book=None), kill)
+    tick(sessions, acc_id, T0, book(T0, "80.00", "80.02"))
+    with sessions() as s:
+        assert engine.pending_commands(s, acc_id) == []
+        pause = s.scalar(select(PaperCommand).where(PaperCommand.command == "PAUSE"))
+        ev = s.scalar(select(PaperBotEvent).where(PaperBotEvent.command_id == pause.id))
+        assert ev is not None and ev.reason == "REFUSED_PAUSE"
+        risk = s.scalar(select(PaperRiskEvent).where(PaperRiskEvent.kind == "KILL_SWITCH"))
+        assert risk.detail == {"by": "owner"}  # no username in the public event log
+
+
+def test_day_start_ignores_the_midnight_slot_marked_after_midnight(env: Any) -> None:
+    from autotrader.db.models import PaperEquitySnapshot
+
+    sessions, acc_id, _ = env
+    day = utc(2026, 10, 14)
+    with sessions.begin() as s:
+        s.add(PaperEquitySnapshot(account_id=acc_id, at=day - timedelta(minutes=5),
+                                  cash=D(1000), unrealized=D(0), equity=D("1000")))  # fmt: skip
+        # the 00:00 slot, marked at 00:04 after a loss
+        s.add(PaperEquitySnapshot(account_id=acc_id, at=day, cash=D(1000),
+                                  unrealized=D(-6), equity=D("994")))  # fmt: skip
+    with sessions() as s:
+        acc = s.get(engine.PaperAccount, acc_id)
+        assert engine.day_start_equity(s, acc, day + timedelta(hours=3)) == D("1000")
+
+
 def test_restart_rechecks_and_skips_bars_from_downtime(env: Any) -> None:
     sessions, acc_id, script = env
     start(sessions, acc_id)

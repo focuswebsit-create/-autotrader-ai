@@ -167,7 +167,9 @@ export default function Terminal() {
         confirm: CONFIRM[action]?.needsConfirm ?? false,
       });
       setBusy(null);
-      delete keys.current[action];
+      // keep the key when the outcome is unknown (network error): a retry is then the
+      // same command, never a second one
+      if (res.ok || res.error !== "CONTROL_UNREACHABLE") delete keys.current[action];
       if (res.ok) {
         setPending({ action, from: state, at: Date.now() });
         setMsg({ ok: true, text: "הפקודה נשלחה ומבוצעת על ידי מנוע ה־PAPER…" });

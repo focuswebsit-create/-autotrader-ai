@@ -209,18 +209,33 @@ def unrealized(pos: PaperPosition, book: L2Book | None) -> Decimal | None:
     return sign * (px - pos.entry_price) * pos.size
 
 
-def high_water(session: Session, acc: PaperAccount) -> Decimal:
-    values = session.scalars(
-        select(PaperEquitySnapshot.equity).where(PaperEquitySnapshot.account_id == acc.id)
+def last_halt_reset(session: Session, acc_id: int) -> datetime | None:
+    t = session.scalar(
+        select(func.max(PaperBotEvent.occurred_at)).where(
+            PaperBotEvent.account_id == acc_id, PaperBotEvent.reason == "HALT_RESET"
+        )
     )
-    return max([acc.initial_equity, *(Decimal(v) for v in values)])
+    return _utc(t) if t is not None else None
+
+
+def high_water(session: Session, acc: PaperAccount, *, since_reset: bool = False) -> Decimal:
+    """Highest marked equity. With ``since_reset`` the drawdown limit is measured from
+    the owner's last HALT_RESET (otherwise a drawdown halt could never be reset: the
+    bot would halt again on the very next tick)."""
+    q = select(PaperEquitySnapshot.equity).where(PaperEquitySnapshot.account_id == acc.id)
+    reset = last_halt_reset(session, acc.id) if since_reset else None
+    if reset is not None:
+        q = q.where(PaperEquitySnapshot.at > reset)
+        return max([Decimal(0), *(Decimal(v) for v in session.scalars(q))])
+    return max([acc.initial_equity, *(Decimal(v) for v in session.scalars(q))])
 
 
 def day_start_equity(session: Session, acc: PaperAccount, now: datetime) -> Decimal:
     midnight = datetime(now.year, now.month, now.day, tzinfo=UTC)
     snap = session.scalar(
         select(PaperEquitySnapshot.equity)
-        .where(PaperEquitySnapshot.account_id == acc.id, PaperEquitySnapshot.at <= midnight)
+        # strictly before midnight: the 00:00 slot may be marked minutes after midnight
+        .where(PaperEquitySnapshot.account_id == acc.id, PaperEquitySnapshot.at < midnight)
         .order_by(PaperEquitySnapshot.at.desc())
         .limit(1)
     )
@@ -237,11 +252,7 @@ def day_start_equity(session: Session, acc: PaperAccount, now: datetime) -> Deci
 
 
 def consecutive_losses(session: Session, acc_id: int) -> int:
-    reset = session.scalar(
-        select(func.max(PaperBotEvent.occurred_at)).where(
-            PaperBotEvent.account_id == acc_id, PaperBotEvent.reason == "HALT_RESET"
-        )
-    )
+    reset = last_halt_reset(session, acc_id)
     q = (
         select(PaperPositionClose.net_pnl)
         .join(PaperPosition, PaperPosition.id == PaperPositionClose.position_id)
@@ -457,16 +468,24 @@ def preflight(
     ]
 
 
+def pending_commands(session: Session, acc_id: int) -> list[PaperCommand]:
+    """Commands no bot event refers to yet (every handled command writes one, with its
+    id). Not "id > last handled": a command committed late with a lower id is never
+    skipped."""
+    done = select(PaperBotEvent.command_id).where(
+        PaperBotEvent.account_id == acc_id, PaperBotEvent.command_id.is_not(None)
+    )
+    return list(
+        session.scalars(
+            select(PaperCommand)
+            .where(PaperCommand.account_id == acc_id, PaperCommand.id.not_in(done))
+            .order_by(PaperCommand.id)
+        )
+    )
+
+
 def apply_commands(session: Session, acc: PaperAccount, cfg: PaperConfig, market: Market) -> None:
-    last = session.scalar(
-        select(func.max(PaperBotEvent.command_id)).where(PaperBotEvent.account_id == acc.id)
-    )
-    cmds = session.scalars(
-        select(PaperCommand)
-        .where(PaperCommand.account_id == acc.id, PaperCommand.id > (last or 0))
-        .order_by(PaperCommand.id)
-    )
-    for cmd in cmds:
+    for cmd in pending_commands(session, acc.id):
         _apply(session, acc, cfg, market, cmd)
 
 
@@ -541,7 +560,8 @@ def _apply(
             command_id=cmd.id,
             detail={"policy": "no new entries; open position keeps stop/target"},
         )
-        risk_event(session, acc.id, "KILL_SWITCH", {"by": cmd.requested_by}, now)
+        # who pressed it is in audit_log (private); the public event log only says "owner"
+        risk_event(session, acc.id, "KILL_SWITCH", {"by": "owner"}, now)
     elif c == "CLOSE_AND_STOP":
         pos = open_position(session, acc.id)
         new = "HALTED" if st == "HALTED" else "STOPPED"
@@ -854,7 +874,7 @@ def risk_monitors(session: Session, acc: PaperAccount, cfg: PaperConfig, market:
     if unreal is None:
         return  # position open but no fresh book: can't mark it, monitors wait
     st = current_state(session, acc.id).state
-    hwm = max(high_water(session, acc), eq)
+    hwm = max(high_water(session, acc, since_reset=True), eq)
     if st != "HALTED" and eq <= hwm * (1 - cfg.risk.drawdown_halt_pct / 100):
         set_state(
             session,

@@ -14,9 +14,11 @@ Enforced by the database (not only by code):
   latest bot state is RUNNING (stop / pause / kill switch / halt are binding), at
   most one open position per account, and at most risk.max_entries_per_day
   entries per UTC day;
-* roles: reader (API) SELECT on paper_* only (never auth_*); writer (paper
-  worker) INSERT on paper_* except commands; controller (Control API) INSERT on
-  commands, audit_log and auth_sessions/attempts, UPDATE(revoked_at) on sessions.
+* roles: reader (API) SELECT on paper_* only (never auth_*); writer (collector /
+  forward recorder) SELECT only on paper_*; trader (paper worker; member of writer
+  for market data / funding / heartbeats) INSERT on paper_* except commands;
+  controller (Control API) INSERT on commands, audit_log and auth_sessions/attempts,
+  UPDATE(revoked_at) on sessions.
 
 Revision ID: 0009_paper_trading
 Revises: 0008_forward_realtime_guard
@@ -47,13 +49,18 @@ ALL_TABLES = (*APPEND_ONLY, "auth_sessions")
 PAPER_TABLES = tuple(t for t in APPEND_ONLY if t.startswith("paper_"))
 #: (table, timestamp column) that must be written in real time
 REALTIME = (
-    ("paper_decisions", "evaluated_at"),
-    ("paper_orders", "created_at"),
-    ("paper_ledger", "occurred_at"),
-    ("paper_bot_events", "occurred_at"),
-    ("paper_commands", "requested_at"),
+    ("paper_decisions", "evaluated_at", 5),
+    ("paper_orders", "created_at", 5),
+    ("paper_ledger", "occurred_at", 5),
+    ("paper_bot_events", "occurred_at", 5),
+    ("paper_commands", "requested_at", 5),
+    ("paper_positions", "opened_at", 5),
+    ("paper_position_closes", "closed_at", 5),
+    ("paper_risk_events", "occurred_at", 5),
+    # stamped with the 5-minute slot start, so up to 5 min before the clock
+    ("paper_equity_snapshots", "at", 11),
 )
-ROLES = ("autotrader_reader", "autotrader_writer", "autotrader_controller")
+ROLES = ("autotrader_reader", "autotrader_writer", "autotrader_trader", "autotrader_controller")
 
 revision: str = "0009_paper_trading"
 down_revision: str | None = "0008_forward_realtime_guard"
@@ -492,9 +499,9 @@ FUNCTIONS = """
 CREATE FUNCTION paper_require_wallclock() RETURNS trigger AS $$
 DECLARE
     ts timestamptz := (to_jsonb(NEW) ->> TG_ARGV[0])::timestamptz;
+    tol interval := make_interval(mins => COALESCE(TG_ARGV[1], '5')::int);
 BEGIN
-    IF ts < clock_timestamp() - interval '5 minutes'
-       OR ts > clock_timestamp() + interval '5 minutes' THEN
+    IF ts < clock_timestamp() - tol OR ts > clock_timestamp() + tol THEN
         RAISE EXCEPTION '%.% must be written in real time (% vs db clock %)',
             TG_TABLE_NAME, TG_ARGV[0], ts, clock_timestamp();
     END IF;
@@ -593,10 +600,10 @@ def _enforcement() -> None:
             f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
             "FOR EACH STATEMENT EXECUTE FUNCTION forbid_truncate();"
         )
-    for table, column in REALTIME:
+    for table, column, minutes in REALTIME:
         op.execute(
             f"CREATE TRIGGER trg_{table}_wallclock BEFORE INSERT ON {table} "
-            f"FOR EACH ROW EXECUTE FUNCTION paper_require_wallclock('{column}');"
+            f"FOR EACH ROW EXECUTE FUNCTION paper_require_wallclock('{column}', '{minutes}');"
         )
     for table in ("paper_orders", "paper_positions"):
         op.execute(
@@ -610,8 +617,11 @@ def _enforcement() -> None:
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'autotrader_controller') THEN
                 CREATE ROLE autotrader_controller NOLOGIN;
             END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'autotrader_trader') THEN
+                CREATE ROLE autotrader_trader NOLOGIN;
+            END IF;
         EXCEPTION WHEN insufficient_privilege THEN
-            RAISE NOTICE 'cannot create role autotrader_controller; see infra/db/roles.sql';
+            RAISE NOTICE 'cannot create Phase 3 roles; see infra/db/roles.sql';
         END
         $$;
         """
@@ -621,7 +631,9 @@ def _enforcement() -> None:
     for role in ROLES:
         _grant("GRANT USAGE ON SCHEMA public TO " + role, role)
         _grant(f"GRANT SELECT ON {paper} TO {role}", role)
-    _grant(f"GRANT INSERT ON {writer_insert} TO autotrader_writer", "autotrader_writer")
+    # only the paper worker's role may write PAPER rows (not the collector's)
+    _grant(f"GRANT INSERT ON {writer_insert} TO autotrader_trader", "autotrader_trader")
+    _grant("GRANT autotrader_writer TO autotrader_trader", "autotrader_trader")
     c = "autotrader_controller"
     _grant(f"GRANT INSERT ON paper_commands, audit_log TO {c}", c)
     _grant(
@@ -631,11 +643,12 @@ def _enforcement() -> None:
     )
     _grant(f"GRANT INSERT ON auth_sessions, auth_login_attempts TO {c}", c)
     _grant(f"GRANT UPDATE (revoked_at) ON auth_sessions TO {c}", c)
-    for role in ("autotrader_writer", "autotrader_controller"):
+    for role in ("autotrader_writer", "autotrader_trader", "autotrader_controller"):
         _grant(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}", role)
 
 
 def _drop_enforcement() -> None:
+    _grant("REVOKE autotrader_writer FROM autotrader_trader", "autotrader_trader")
     for role in ROLES:
         _grant(f"REVOKE ALL ON {', '.join(ALL_TABLES)} FROM {role}", role)
     _grant(
@@ -645,7 +658,7 @@ def _drop_enforcement() -> None:
     )
     for table in ("paper_orders", "paper_positions"):
         op.execute(f"DROP TRIGGER IF EXISTS trg_{table}_entry_guard ON {table}")
-    for table, _ in REALTIME:
+    for table, _, _ in REALTIME:
         op.execute(f"DROP TRIGGER IF EXISTS trg_{table}_wallclock ON {table}")
     for table in ALL_TABLES:
         op.execute(f"DROP TRIGGER IF EXISTS trg_{table}_no_truncate ON {table}")

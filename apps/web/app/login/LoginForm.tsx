@@ -12,7 +12,7 @@ function Form() {
   const params = useSearchParams();
   const next = params.get("next");
   // only same-site relative targets (no open redirect)
-  const target = next && /^\/[a-z/]*$/.test(next) ? next : "/terminal";
+  const target = next && /^\/(?![/\\])[a-z/]*$/.test(next) ? next : "/terminal";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
