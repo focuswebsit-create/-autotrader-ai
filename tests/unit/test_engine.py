@@ -134,7 +134,11 @@ def test_short_mirror() -> None:
 def test_funding_sign_hours_and_missing_assumption() -> None:
     # entry at 14:30, exit at END_OF_DATA 17:00 -> funding hours 15:00, 16:00, 17:00
     b = flat(7)
-    rates = {T0 + timedelta(hours=1): D("0.0001"), T0 + timedelta(hours=2): D("0.0001")}
+    rates = {
+        T0: D("0.00005"),  # known before the signal (feed is live); not charged
+        T0 + timedelta(hours=1): D("0.0001"),
+        T0 + timedelta(hours=2): D("0.0001"),
+    }
     costs = CostModel(missing_funding_rate=D("0.00001"))
     lres, _ = run(b, {0: L}, costs=costs, funding=rates)
     sres, _ = run(b, {0: S}, costs=costs, funding=rates)
@@ -176,7 +180,7 @@ def test_data_gap_and_dead_bar_block_entries() -> None:
     res, _ = run(gapped, {0: L}, costs=BASE)
     assert res.trades == [] and res.signals[0].reason == "DATA_GAP"
     dead = list(b)
-    dead[1] = replace(dead[1], volume=D(0))
+    dead[0] = replace(dead[0], volume=D(0))  # signal bar had no trades (known at its close)
     res2, _ = run(dead, {0: L}, costs=BASE)
     assert res2.trades == [] and res2.signals[0].reason == "NO_PLAUSIBLE_EXECUTION"
 
@@ -313,3 +317,21 @@ def test_invalid_configs_rejected() -> None:
         CostModel(taker_fee_rate=D("-0.1")).validate()
     with pytest.raises(ValueError):
         RiskConfig(max_leverage=D(50)).validate()
+
+
+def test_missing_funding_feed_blocks_entries_fail_closed() -> None:
+    from autotrader.backtest.engine import Engine, FundingBook
+    from tests.unit.bt_helpers import Scripted
+
+    b = flat(5)
+    res = Engine(b, Scripted({0: L}), stop_atr=D("1.5"), tp_r=D(2), max_hold_bars=None,
+                 costs=BASE, risk=RiskConfig(), execution=ExecConfig(),
+                 funding=FundingBook({})).run()  # fmt: skip
+    assert res.trades == [] and res.signals[0].reason == "FUNDING_DATA_MISSING"
+
+
+def test_offhours_costs_apply_on_holidays() -> None:
+    # Good Friday 2026-04-03: CME closed although Mon-Fri hours would say "open"
+    gf = T0.replace(month=4, day=3)
+    res, viol = run(flat(5, start=gf), {0: L}, costs=BASE, ex=ExecConfig(session=None))
+    assert viol == [] and res.trades[0].entry_offhours

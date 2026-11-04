@@ -95,6 +95,8 @@ class ExecConfig:
     max_signal_range_atr: Decimal = Decimal(4)
     #: |hourly funding| above this blocks entries (abnormal funding)
     max_abs_funding_rate: Decimal = Decimal("0.0005")
+    #: fail closed: no recorded funding in the last 2h blocks entries
+    require_funding_data: bool = True
     sz_decimals: int = 3
 
     def as_dict(self) -> dict[str, Any]:
@@ -112,6 +114,7 @@ class ExecConfig:
             },
             "max_signal_range_atr": str(self.max_signal_range_atr),
             "max_abs_funding_rate": str(self.max_abs_funding_rate),
+            "require_funding_data": self.require_funding_data,
             "sz_decimals": self.sz_decimals,
         }
 
@@ -300,7 +303,7 @@ class Engine:
 
     def _mult(self, at: datetime) -> Decimal:
         s = self.ex.session or ReferenceSession()
-        return Decimal(1) if s.is_open(at) else self.costs.offhours_multiplier
+        return Decimal(1) if s.reference_trading(at) else self.costs.offhours_multiplier
 
     def _market_fill(self, ref: Decimal, side_sign: int, at: datetime) -> tuple[Decimal, bool]:
         """Fill for a market order: +sign = buy. Returns (price, offhours)."""
@@ -363,8 +366,6 @@ class Engine:
         sig_bar = self.bars[pend.signal_index]
         side = d.side
         equity = self.cash
-        if bar.volume <= 0:
-            return self._block(sig_bar, d, "NO_PLAUSIBLE_EXECUTION")
         fill, off = self._market_fill(bar.open, side.sign, bar.open_time)
         sz = self.ex.sz_decimals
         raw_stop = fill - side.sign * self.stop_atr * d.atr
@@ -460,7 +461,12 @@ class Engine:
             return "MAX_ENTRIES_PER_DAY", None
         if bar.high - bar.low > self.ex.max_signal_range_atr * d.atr:
             return "ABNORMAL_VOLATILITY", None
+        # no trades in the signal bar (known at its close) -> no evidence of a live market
+        if bar.volume <= 0:
+            return "NO_PLAUSIBLE_EXECUTION", None
         fr = self.funding.latest_at_or_before(t)
+        if fr is None and self.ex.require_funding_data:
+            return "FUNDING_DATA_MISSING", None
         if fr is not None and abs(fr) > self.ex.max_abs_funding_rate:
             return "ABNORMAL_FUNDING", None
         if self.ex.skip_fill_rate > 0 and Decimal(str(self.rng.random())) < self.ex.skip_fill_rate:
@@ -483,7 +489,7 @@ class Engine:
         if market:
             fill, off = self._market_fill(ref, -p.side.sign, at)
         else:
-            fill, off = ref, not (self.ex.session or ReferenceSession()).is_open(at)
+            fill, off = ref, not (self.ex.session or ReferenceSession()).reference_trading(at)
         exit_fee = self.costs.taker_fee_rate * fill * p.size
         self.cash += p.side.sign * (fill - p.entry_price) * p.size - exit_fee
         p.exit_time, p.exit_bar_open, p.exit_ref_price = at, bar.open_time, ref

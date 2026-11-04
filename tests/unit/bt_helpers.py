@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -77,6 +78,9 @@ def run(
     prep = signals if isinstance(signals, Scripted) else Scripted(signals, atr)
     r = risk or RiskConfig()
     e = ex or ExecConfig()
+    if not funding:
+        # synthetic tests without funding data: don't fail closed on the missing feed
+        e = replace(e, require_funding_data=False)
     res = Engine(
         b,
         prep,

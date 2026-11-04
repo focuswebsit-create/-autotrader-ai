@@ -246,7 +246,8 @@ def test_random_walk_has_no_edge_after_costs() -> None:
                       min(a.low, b.low), b.close, a.volume + b.volume))  # fmt: skip
     data = MarketData("xyz:CL", m30, h1, {}, "synthetic random walk", m30[-1].close_time)
     for sid in STRATEGIES:
-        out = Runner(data).run(sid, default_params(sid), start=m30[120].close_time)
+        runner = Runner(data, execution=ExecConfig(require_funding_data=False))
+        out = runner.run(sid, default_params(sid), start=m30[120].close_time)
         assert out.violations == []
         ci = out.summary["expectancy_r_ci95"]
         assert ci is None or ci[0] <= 0, (sid, out.summary)

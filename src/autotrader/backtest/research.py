@@ -374,6 +374,9 @@ def walk_forward(
         "folds": folds,
         "oos": _trade_stats(oos, runner.risk.initial_equity),
         "violations": violations,
+        "note": "Rolling folds cover the whole history, so later TRAIN windows overlap the "
+        "validation/holdout segments of the 70/15/15 split. Walk-forward is a separate "
+        "out-of-sample check; it is not the untouched holdout.",
     }
 
 

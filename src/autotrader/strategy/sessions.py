@@ -94,12 +94,36 @@ HOLIDAYS: Final[frozenset[date]] = frozenset(
     }
 )
 
+#: Days the exchange is NOT a business day (full closures / no settlement). Used only for
+#: counting business days to the CL expiry; narrower than the conservative HOLIDAYS list.
+EXCHANGE_HOLIDAYS: Final[frozenset[date]] = frozenset(
+    {
+        date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17), date(2025, 4, 18),
+        date(2025, 5, 26), date(2025, 6, 19), date(2025, 7, 4), date(2025, 9, 1),
+        date(2025, 11, 27), date(2025, 12, 25),
+        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
+        date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
+        date(2026, 11, 26), date(2026, 12, 25),
+        date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15), date(2027, 3, 26),
+        date(2027, 5, 31), date(2027, 6, 18), date(2027, 7, 5), date(2027, 9, 6),
+        date(2027, 11, 25), date(2027, 12, 24),
+    }
+)  # fmt: skip
+#: Full closures: Globex does not reopen on the evening BEFORE these days either.
+FULL_CLOSURES: Final[frozenset[date]] = frozenset(
+    {
+        date(2025, 1, 1), date(2025, 4, 18), date(2025, 12, 25),
+        date(2026, 1, 1), date(2026, 4, 3), date(2026, 12, 25),
+        date(2027, 1, 1), date(2027, 3, 26), date(2027, 12, 24),
+    }
+)  # fmt: skip
+
 _DAILY_CLOSE: Final = time(17, 0)
 _DAILY_OPEN: Final = time(18, 0)
 
 
 def _is_business_day(d: date) -> bool:
-    return d.weekday() < 5 and d not in HOLIDAYS
+    return d.weekday() < 5 and d not in EXCHANGE_HOLIDAYS
 
 
 def _shift_business_days(d: date, n: int) -> date:
@@ -148,6 +172,19 @@ class ReferenceSession:
             return t < _DAILY_CLOSE
         return not (_DAILY_CLOSE <= t < _DAILY_OPEN)
 
+    @classmethod
+    def reference_trading(cls, at: datetime) -> bool:
+        """Holiday-aware and conservative: False on any day in ``HOLIDAYS`` and on the
+        evening session before a full closure (e.g. Thursday night before Good Friday).
+        Used for the off-hours cost multiplier."""
+        local = at.astimezone(NY)
+        day = local.date()
+        if day in HOLIDAYS:
+            return False
+        if local.time() >= _DAILY_OPEN and (day + timedelta(days=1)) in FULL_CLOSURES:
+            return False
+        return cls.is_open(at)
+
     def entry_block_reason(self, at: datetime) -> str | None:
         """``None`` if a new entry may be placed at ``at``; otherwise a reason code."""
         if at.tzinfo is None:
@@ -156,7 +193,7 @@ class ReferenceSession:
         day = local.date()
         if not CALENDAR_START <= day <= CALENDAR_END:
             return "SESSION_CALENDAR_UNKNOWN"
-        if day in HOLIDAYS:
+        if day in HOLIDAYS or (self.is_open(at) and not self.reference_trading(at)):
             return "REFERENCE_HOLIDAY"
         if not self.is_open(at):
             return "REFERENCE_SESSION_CLOSED"

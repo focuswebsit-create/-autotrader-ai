@@ -49,6 +49,15 @@ def test_holidays_block_entries_all_day() -> None:
     assert S.entry_block_reason(utc(2026, 12, 25, 15)) == "REFERENCE_HOLIDAY"
 
 
+def test_evening_before_full_closure_is_closed() -> None:
+    # Thursday 2026-04-02 19:00 NY (23:00 UTC): no Globex session before Good Friday
+    assert S.entry_block_reason(utc(2026, 4, 2, 23)) == "REFERENCE_HOLIDAY"
+    assert not S.reference_trading(utc(2026, 4, 2, 23))
+    assert S.reference_trading(utc(2026, 4, 1, 23))  # a normal Wednesday evening
+    # holiday-aware for costs: Labor Day afternoon is not regular trading
+    assert S.is_open(utc(2026, 9, 7, 19)) and not S.reference_trading(utc(2026, 9, 7, 19))
+
+
 def test_unknown_calendar_fails_closed() -> None:
     assert S.entry_block_reason(utc(2028, 3, 7, 15)) == "SESSION_CALENDAR_UNKNOWN"
     assert S.entry_block_reason(utc(2024, 3, 5, 15)) == "SESSION_CALENDAR_UNKNOWN"
@@ -64,6 +73,10 @@ def test_cl_expiry_rule() -> None:
     assert cl_expiry(2026, 1) == date(2026, 1, 20)
     # Good Friday is not a business day (2026-04-03 is before the 25th; rule still holds)
     assert cl_expiry(2026, 4) == date(2026, 4, 21)
+    # December: Christmas Eve is a CME business day, Christmas is not
+    assert cl_expiry(2025, 12) == date(2025, 12, 19)
+    assert cl_expiry(2026, 12) == date(2026, 12, 21)
+    assert cl_expiry(2027, 12) == date(2027, 12, 20)
 
 
 def test_roll_window_blocks_entries() -> None:
