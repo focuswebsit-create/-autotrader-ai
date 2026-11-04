@@ -639,3 +639,23 @@ def test_worker_heartbeat_and_pipeline_health(db: sessionmaker[Session], tmp_pat
     assert "FORWARD_WORKER_DOWN" in codes2  # stopped worker is reported, not hidden
     assert f"FORWARD_TEST_{tid}_NOT_RECORDING" not in codes2
     assert h2["paper_only"] is True
+
+
+def test_health_ignores_superseded_halted_tests(
+    db: sessionmaker[Session], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.conftest import Clock
+
+    sessions = _fresh_copy(db, tmp_path)
+    with sessions.begin() as s:
+        old = rec.create_test(s, COIN, "ema_rsi", now=FREEZE_AT, code_version="t").id
+        rec.add_event(s, old, "INTEGRITY_HALT", {"reason": "CODE_CHANGED"}, FREEZE_AT)
+    c = TestClient(create_app(Settings(database_url=None), sessions, clock=Clock(FREEZE_AT)))
+    codes = {a["code"] for a in c.get("/api/forward/health").json()["alerts"]}
+    assert f"FORWARD_TEST_{old}_INTEGRITY_HALT" in codes  # latest test of ema_rsi is halted
+    with sessions.begin() as s:
+        new = rec.create_test(s, COIN, "ema_rsi", now=FREEZE_AT, code_version="t").id
+    codes = {a["code"] for a in c.get("/api/forward/health").json()["alerts"]}
+    assert f"FORWARD_TEST_{old}_INTEGRITY_HALT" not in codes  # superseded by test `new`
+    tests = c.get("/api/forward/tests").json()["tests"]
+    assert {t["id"]: t["state"] for t in tests} == {new: "ACTIVE", old: "INTEGRITY_HALT"}
