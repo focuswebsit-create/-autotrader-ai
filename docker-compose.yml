@@ -1,0 +1,57 @@
+# Local development stack. PAPER-ONLY: no service receives wallet keys.
+# Usage: cp .env.example .env && docker compose up --build
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-autotrader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local-only}
+      POSTGRES_DB: ${POSTGRES_DB:-autotrader}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      retries: 20
+
+  migrate:
+    build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
+    environment: &backend_env
+      AUTOTRADER_TRADING_MODE: PAPER
+      AUTOTRADER_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-autotrader}:${POSTGRES_PASSWORD:-change-me-local-only}@db:5432/${POSTGRES_DB:-autotrader}
+      AUTOTRADER_MARKET_DEX: ${AUTOTRADER_MARKET_DEX:-xyz}
+      AUTOTRADER_MARKET_COIN: ${AUTOTRADER_MARKET_COIN:-xyz:CL}
+      AUTOTRADER_CORS_ORIGINS: http://localhost:3000
+    command: ["alembic", "upgrade", "head"]
+    depends_on: { db: { condition: service_healthy } }
+
+  api:
+    build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
+    environment: *backend_env
+    ports: ["127.0.0.1:8000:8000"]
+    restart: unless-stopped
+    healthcheck:
+      # /health answers 503 when the database is down -> container reports unhealthy.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+  worker:
+    build: { context: ., dockerfile: infra/docker/backend.Dockerfile }
+    environment: *backend_env
+    command: ["python", "-m", "autotrader.worker", "--interval", "300"]
+    restart: unless-stopped
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+  web:
+    build: { context: ., dockerfile: infra/docker/web.Dockerfile }
+    environment:
+      API_BASE_URL: http://api:8000
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
+    depends_on: { api: { condition: service_healthy } }
+
+volumes:
+  pgdata:

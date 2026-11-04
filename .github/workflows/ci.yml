@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: autotrader
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: autotrader_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U autotrader -d autotrader_test" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      AUTOTRADER_DATABASE_URL: postgresql+psycopg://autotrader:ci-only@localhost:5432/autotrader_test
+      AUTOTRADER_TEST_DATABASE_URL: postgresql+psycopg://autotrader:ci-only@localhost:5432/autotrader_test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check src tests && uv run ruff format --check src tests
+      - name: Typecheck
+        run: uv run mypy
+      - name: Safety check
+        run: uv run autotrader safety-check
+      - name: Migrations (upgrade / downgrade / upgrade)
+        run: uv run alembic upgrade head && uv run alembic downgrade base && uv run alembic upgrade head
+      - name: Tests (unit + PostgreSQL; live tests are opt-in)
+        run: uv run pytest --cov=autotrader --cov-report=term-missing
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate compose file
+        run: cp .env.example .env && docker compose config -q
+      - name: Build backend image
+        run: docker build -f infra/docker/backend.Dockerfile -t autotrader-backend:ci .
+      - name: Backend image safety check (runs as non-root, PAPER only)
+        run: |
+          test "$(docker run --rm autotrader-backend:ci id -u)" != "0"
+          docker run --rm autotrader-backend:ci autotrader safety-check
+      - name: Build web image
+        run: docker build -f infra/docker/web.Dockerfile -t autotrader-web:ci .
