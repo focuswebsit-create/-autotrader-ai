@@ -1,8 +1,21 @@
 # Status
 
-**Current phase:** Phase 2.5 — Forward Testing & Strategy Validation (built, PR awaiting review; forward observation must run on persistent infrastructure) · **Mode:** PAPER ONLY · **Updated:** 2026-11-04
+**Current phase:** Phase 3 — Autonomous PAPER Trading Engine & Live Terminal (built, PR awaiting review; results need weeks on persistent infrastructure) · **Mode:** PAPER ONLY · **Updated:** 2026-11-04
 
 Phase 1 details and evidence: `docs/PHASE1_REPORT.md`.
+
+## Phase 3 — PAPER engine & terminal (see PHASE3_REPORT.md)
+| Gate item | State |
+|---|---|
+| Autonomous LONG/SHORT on live L2 data, fees / slippage / funding, SL/TP | ✅ engine + tests; live run on mainnet data |
+| Risk limits 0.25% / 1% daily / 5% DD, 3-loss halt, max 4/day | ✅ engine + DB guards + tests |
+| No duplicate / retroactive trades, restart recovery | ✅ unique keys, entry window, DB real-time guards, tests |
+| Ledger / positions / trades in DB, append-only | ✅ migration 0009, PostgreSQL tests |
+| `/terminal` (Dark Premium, RTL, desktop + iPhone), start gating, stop, Kill Switch | ✅ E2E on the live stack |
+| Control API: login, ADMIN, CSRF, rate limit, audit log, double-start protection | ✅ 22 tests + PostgreSQL concurrency test |
+| Independent code & security review | ✅ 8 findings, all fixed with regression tests |
+| Docker services with auto-restart and monitoring | ✅ config validated; images built by CI only |
+| Profitability | ❌ not shown — no closed paper trades yet; experimental |
 
 ## Phase 0 gate: "startup performs public, read-only discovery and proves it cannot trade"
 
@@ -24,7 +37,7 @@ Full review and fixes: see `docs/QA_REVIEW_PHASE0.md`. Locally: 178 tests passed
 ## Known limitations
 - `hyperliquid.gitbook.io` is blocked by the environment network policy, so ADR-004 and ADR-005 rest on prior knowledge plus live metadata. To re-verify, add that domain to the allowed list.
 - Docker images cannot be built in the cloud dev container (no daemon); the CI `docker` job builds both images.
-- No authentication yet (read-only API, localhost-bound). Required before any online exposure (Phase 4).
+- (Phase 3) Bot control requires an ADMIN login (Control API, ADR-034). Read-only pages still have no login: keep the site behind Tailscale / an access layer.
 - (Resolved in Phase 1) Least-privilege DB users `autotrader_api` / `autotrader_worker` (ADR-019).
 - (Resolved in Phase 1) WebSocket client guarded by an allow-list equivalent to the HTTP one (ADR-018).
 - Entry gating in the live API is still a placeholder (`entries_allowed=false`); the Phase 2 session/risk gates are used by the backtester and will drive the Phase 3 paper engine.
