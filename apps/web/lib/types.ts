@@ -329,3 +329,94 @@ export type Report = {
 };
 
 export type RunDetail = { header: RunHeader; report: Report };
+
+// ------------------------------------------------------------------ Phase 2.5: forward tests
+export type ForwardState = "ACTIVE" | "STOPPED" | "INTEGRITY_HALT";
+
+export type ForwardTestHeader = {
+  id: number;
+  strategy_id: string;
+  title_he: string | null;
+  strategy_version: string;
+  params_hash: string;
+  state: ForwardState;
+  starts_at: string;
+  created_at: string;
+};
+
+export type ForwardDecision = {
+  bar_open_time: string;
+  bar_close_time: string;
+  evaluated_at: string;
+  late: boolean;
+  side: "LONG" | "SHORT" | null;
+  reason: string;
+  atr: string | null;
+  rationale: Record<string, string>;
+  market: {
+    bar: { open: string; high: string; low: string; close: string; volume: string; trades: number | null };
+    funding_rate_last: string | null;
+    mark_px: string | null;
+    oracle_px: string | null;
+    oracle_mark_divergence_bps: string | null;
+  };
+  strategy_version: string;
+  params_hash: string;
+  input_digest: string;
+};
+
+export type ForwardReport = {
+  schema: string;
+  paper_only: true;
+  test: {
+    id: number;
+    state: ForwardState;
+    strategy: { id: string; version: string; title_he: string };
+    params: Record<string, string | number | null>;
+    params_hash: string;
+    code_hash: string;
+    code_hash_matches: boolean;
+    code_version: string;
+    config_sha256: string;
+    created_at: string;
+    starts_at: string;
+    history_anchor: string;
+    thresholds: { min_trades: number; min_days: number; min_trade_days: number };
+    costs: Record<string, string>;
+    risk: Record<string, string>;
+  };
+  progress: {
+    now: string;
+    observed_days: number;
+    decisions: number;
+    signals: number;
+    late_decisions: number;
+    last_decision_bar: string | null;
+    last_closed_bar: string | null;
+    data_stale: boolean;
+    closed_trades: number;
+    trade_days: number;
+  };
+  summary: Summary | null;
+  stats: { trades: number; win_rate: number | null; profit_factor: number | string | null; expectancy_r: number | null; expectancy_r_ci95: [number, number] | null; avg_cost_per_trade: string | null };
+  open_position: { side: string; entry_time: string; entry_price: string; size: string; stop: string; target: string; unrealized_pnl: string; fees_paid: string; funding_paid: string } | null;
+  pending_signal: { time: string; side: string } | null;
+  trades: BtTrade[];
+  equity: [string, string, string][];
+  signals: ForwardDecision[];
+  engine_signals: { time: string; side: string; status: string; reason: string; category: string; trade_id: number | null }[];
+  events: { time: string; event: string; detail: Record<string, unknown> }[];
+  parity: { checked: number; mismatches: number; examples: unknown[] };
+  comparison: {
+    available: boolean;
+    note: string;
+    reference_run_id?: number;
+    reference_verdict?: string;
+    reference_period?: [string, string];
+    metrics?: { metric: string; backtest: number | string | null; forward: number | string | null }[];
+    expectancy_consistency?: "INSUFFICIENT_DATA" | "CONSISTENT" | "FORWARD_WORSE" | "FORWARD_BETTER";
+  };
+  stress_2x_costs_net: string | null;
+  audit: { violations: string[]; violation_count: number };
+  verdict: { status: Verdict; reasons: string[]; criteria: { criterion: string; passed: boolean; detail: string }[] };
+};

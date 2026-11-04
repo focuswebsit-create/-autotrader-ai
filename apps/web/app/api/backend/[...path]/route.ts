@@ -13,9 +13,10 @@ const ALLOWED = new Set([
   "system/mode",
   "backtest/runs",
   "backtest/strategies",
+  "forward/tests",
 ]);
 // Run details: backtest/runs/<numeric id> only.
-const RUN_DETAIL = /^backtest\/runs\/[1-9][0-9]{0,15}$/;
+const RUN_DETAIL = /^(backtest\/runs\/[1-9][0-9]{0,15}|forward\/tests\/[1-9][0-9]{0,15}(\/decisions)?)$/;
 
 export const dynamic = "force-dynamic";
 

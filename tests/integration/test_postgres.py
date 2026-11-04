@@ -597,3 +597,69 @@ def test_funding_rates_append_only(migrated: str) -> None:
             ),
             {"t": now},
         )
+
+
+# ------------------------------------------------------------ Phase 2.5: forward tests (0007)
+
+
+def _forward_test_row(c: Any, starts: str = "2026-11-05T00:00:00Z") -> int:
+    return int(
+        c.execute(
+            text(
+                "INSERT INTO forward_tests (coin, strategy_id, strategy_version, params_hash, "
+                "code_hash, code_version, config, config_sha256, history_anchor, starts_at, "
+                "created_at) VALUES ('xyz:CL','ema_rsi','1.0.0',:h,:h,'t','{}'::jsonb,:h, "
+                "'2026-07-23T00:00:00Z', :s, '2026-11-04T23:50:00Z') RETURNING id"
+            ),
+            {"h": "a" * 64, "s": starts},
+        ).scalar_one()
+    )
+
+
+def test_forward_journal_is_immutable_and_starts_after_freeze(migrated: str) -> None:
+    engine = create_engine(migrated)
+    with engine.begin() as c:
+        tid = _forward_test_row(c)
+        c.execute(
+            text(
+                "INSERT INTO forward_decisions (test_id, bar_open_time, bar_close_time, "
+                "evaluated_at, late, side, reason, rationale, market, strategy_version, "
+                "params_hash, code_hash, input_digest) VALUES (:t, '2026-11-05T00:00:00Z', "
+                "'2026-11-05T00:30:00Z', '2026-11-05T00:30:10Z', false, NULL, 'NO_SETUP', "
+                "'{}'::jsonb, '{}'::jsonb, '1.0.0', :h, :h, :h)"
+            ),
+            {"t": tid, "h": "a" * 64},
+        )
+    bad = {
+        # decision for a bar BEFORE the test started (backfilling the past)
+        "before_start": (
+            "INSERT INTO forward_decisions (test_id, bar_open_time, bar_close_time, evaluated_at, "
+            "late, reason, rationale, market, strategy_version, params_hash, code_hash, "
+            "input_digest) VALUES (:t, '2026-11-04T23:30:00Z', '2026-11-05T00:00:00Z', "
+            "'2026-11-05T00:01:00Z', false, 'NO_SETUP', '{}', '{}', '1', :h, :h, :h)"
+        ),
+        # decided before the bar closed (look-ahead)
+        "lookahead": (
+            "INSERT INTO forward_decisions (test_id, bar_open_time, bar_close_time, evaluated_at, "
+            "late, reason, rationale, market, strategy_version, params_hash, code_hash, "
+            "input_digest) VALUES (:t, '2026-11-05T01:00:00Z', '2026-11-05T01:30:00Z', "
+            "'2026-11-05T01:29:00Z', false, 'NO_SETUP', '{}', '{}', '1', :h, :h, :h)"
+        ),
+        "duplicate_bar": (
+            "INSERT INTO forward_decisions (test_id, bar_open_time, bar_close_time, evaluated_at, "
+            "late, reason, rationale, market, strategy_version, params_hash, code_hash, "
+            "input_digest) VALUES (:t, '2026-11-05T00:00:00Z', '2026-11-05T00:30:00Z', "
+            "'2026-11-05T00:31:00Z', false, 'NO_SETUP', '{}', '{}', '1', :h, :h, :h)"
+        ),
+        "edit_decision": "UPDATE forward_decisions SET side = 'LONG'",
+        "delete_decision": "DELETE FROM forward_decisions",
+        "edit_test": "UPDATE forward_tests SET config = '{\"fast\": 1}'::jsonb",
+        "delete_test": "DELETE FROM forward_tests",
+    }
+    for name, sql in bad.items():
+        with pytest.raises(DBAPIError), engine.begin() as c:
+            c.execute(text(sql), {"t": tid, "h": "a" * 64})
+            pytest.fail(name)  # pragma: no cover
+    # a test can't start in the past relative to its creation
+    with pytest.raises(DBAPIError), engine.begin() as c:
+        _forward_test_row(c, starts="2026-11-04T20:00:00Z")
