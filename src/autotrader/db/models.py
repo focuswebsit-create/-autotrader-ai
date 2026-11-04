@@ -17,6 +17,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -295,4 +296,91 @@ class ServiceHeartbeat(Base):
             "ws_state IN ('DISCONNECTED','CONNECTING','CONNECTED','STALE')",
             name="ck_heartbeat_ws_state",
         ),
+    )
+
+
+# --------------------------------------------------------------------------- Phase 2
+
+
+class FundingRate(Base):
+    """Recorded hourly funding for a market (Hyperliquid ``fundingHistory``). Append-only."""
+
+    __tablename__ = "funding_rates"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    coin: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: exact exchange timestamp of the funding event
+    time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: the funding hour it belongs to (time floored to the hour)
+    hour: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rate: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    premium: Mapped[Decimal | None] = mapped_column(Price)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("coin", "hour", name="uq_funding_rates_hour"),
+        CheckConstraint("rate > -1 AND rate < 1", name="ck_funding_rate_range").ddl_if(
+            dialect="postgresql"
+        ),
+        Index("ix_funding_rates_lookup", "coin", "hour"),
+    )
+
+
+class BacktestRun(Base):
+    """Immutable record of one full research-protocol run (config + data + report)."""
+
+    __tablename__ = "backtest_runs"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    coin: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    params: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    code_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    data_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False)
+    summary: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    report: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    report_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "verdict IN ('PASS','FAIL','INCONCLUSIVE','INVALID')", name="ck_backtest_runs_verdict"
+        ),
+        Index("ix_backtest_runs_strategy", "coin", "strategy_id", "created_at"),
+    )
+
+
+class BacktestTrade(Base):
+    """Trades of a run's PRIMARY backtest (queryable copy of the report's trade list)."""
+
+    __tablename__ = "backtest_trades"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        PK, ForeignKey("backtest_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    trade_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    signal_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    exit_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exit_price: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    exit_reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    size: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    net_pnl: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    r_multiple: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "trade_no", name="uq_backtest_trades_no"),
+        CheckConstraint("side IN ('LONG','SHORT')", name="ck_backtest_trades_side"),
+        CheckConstraint("exit_time >= entry_time", name="ck_backtest_trades_times"),
+        CheckConstraint("entry_time >= signal_time", name="ck_backtest_trades_no_lookahead"),
     )

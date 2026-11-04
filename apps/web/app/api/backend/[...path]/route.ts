@@ -11,14 +11,18 @@ const ALLOWED = new Set([
   "data/issues",
   "market/discovery",
   "system/mode",
+  "backtest/runs",
+  "backtest/strategies",
 ]);
+// Run details: backtest/runs/<numeric id> only.
+const RUN_DETAIL = /^backtest\/runs\/[1-9][0-9]{0,15}$/;
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const { path } = await ctx.params;
   const joined = path.join("/");
-  if (!ALLOWED.has(joined)) {
+  if (!ALLOWED.has(joined) && !RUN_DETAIL.test(joined)) {
     return NextResponse.json({ detail: "NOT_ALLOWED" }, { status: 404 });
   }
   const target = `${BASE}/api/${joined}${req.nextUrl.search}`;

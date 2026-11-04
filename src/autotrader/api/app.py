@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from autotrader import __version__
+from autotrader.api.backtest import build_backtest_router
 from autotrader.api.market_data import build_router
 from autotrader.common.config import Settings, get_settings
 from autotrader.common.safety import (
@@ -55,6 +56,7 @@ def create_app(
         allow_headers=["*"],
     )
     app.include_router(build_router(settings, lambda: sessions, clock))
+    app.include_router(build_backtest_router(settings, lambda: sessions))
 
     @app.get("/health")
     def health(response: Response) -> dict[str, Any]:

@@ -134,3 +134,50 @@ class Clock:
         from datetime import timedelta
 
         self.now = self.now + timedelta(**kw)
+
+
+# --------------------------------------------------------------------------- Phase 2 helpers
+#: Full-history recordings (Hyperliquid mainnet, 2026-11-04 ~07:45 UTC): 5,000 x 30m,
+#: 5,000 x 1h candleSnapshot responses and the fundingHistory pages for xyz:CL.
+PHASE2_RECORDED_AT = datetime(2026, 11, 4, 7, 45, tzinfo=UTC)
+
+
+def _load_gz(name: str) -> Any:
+    import gzip
+
+    with gzip.open(FIXTURES / name, "rt") as f:
+        return json.load(f)
+
+
+@pytest.fixture(scope="session")
+def recorded_market() -> Any:
+    """Real recorded xyz:CL data as backtest input (closed bars only)."""
+    from decimal import Decimal
+
+    from autotrader.backtest.research import MarketData
+    from autotrader.market.candles import Candle, Interval, parse_candle
+    from autotrader.strategy.base import Bar
+
+    def bars(name: str, iv: Interval) -> list[Bar]:
+        out = []
+        for raw in _load_gz(name):
+            c = parse_candle(raw, coin="xyz:CL", interval=iv)
+            assert isinstance(c, Candle)
+            if c.is_closed_at(PHASE2_RECORDED_AT):
+                out.append(Bar.from_candle(c))
+        return out
+
+    funding = {
+        datetime.fromtimestamp(r["time"] / 1000, UTC).replace(minute=0, second=0, microsecond=0): (
+            Decimal(r["fundingRate"])
+        )
+        for r in _load_gz("fundingHistory_xyzCL_2026-11-04.json.gz")
+    }
+    return MarketData(
+        coin="xyz:CL",
+        m30=bars("candleSnapshot_xyzCL_30m_2026-11-04_full.json.gz", Interval.M30),
+        h1=bars("candleSnapshot_xyzCL_1h_2026-11-04_full.json.gz", Interval.H1),
+        funding=funding,
+        source="recorded fixtures 2026-11-04",
+        as_of=PHASE2_RECORDED_AT,
+    )

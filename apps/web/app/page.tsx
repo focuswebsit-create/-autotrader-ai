@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import AutoRefresh from "./AutoRefresh";
 import CandleChart from "./components/CandleChart";
 import DataQuality from "./components/DataQuality";
@@ -131,9 +133,13 @@ export default async function Home() {
       <header>
         <h1 className="text-2xl font-bold">AutoTrader AI</h1>
         <p className="text-sm" style={{ color: "var(--muted)" }}>
-          שלב 1 · מנוע נתוני שוק · נתונים ציבוריים מ־Hyperliquid Mainnet (קריאה בלבד). אין עדיין אסטרטגיה ואין
-          ביצוע עסקאות, גם לא וירטואליות.
+          מנוע נתוני שוק · נתונים ציבוריים מ־Hyperliquid Mainnet (קריאה בלבד). אין ביצוע עסקאות אמיתיות.
         </p>
+        <nav className="mt-2 text-sm">
+          <Link href="/backtest" className="underline">
+            מעבדת Backtest (שלב 2) ←
+          </Link>
+        </nav>
       </header>
 
       <StatusPanel />
