@@ -66,10 +66,10 @@ Data fingerprint `f869a045c247c23c…`. The 5,000-bar API limit is the binding c
 |---|---|---|---|
 | Segments dev / val / holdout (net USDC, trades) | −19.50 (21) / −14.23 (6) / −13.25 (8) | −39.53 (45, halted) / −12.71 (8) / −7.26 (9) | −8.89 (31) / −0.13 (8) / −12.89 (10) |
 | Dev-optimised params on holdout | −1.05 (9) | −8.12 (8) | −8.19 (8) |
-| Walk-forward OOS (4 folds) | 24 trades, −23.62, −0.39 R | 33 trades, −50.81, −0.62 R | 23 trades, −33.90, −0.59 R |
+| Walk-forward OOS (4 folds) | 24 trades, −23.62, −0.39 R | 33 trades, −50.95, −0.62 R | 23 trades, −33.90, −0.59 R |
 | Net at 0.5× / 2× costs | −39.79 / −46.88 | −36.19 / −42.53 | −8.46 / −47.54 |
 | Net at 10× slippage shock | −51.45 | −41.39 | −51.01 |
-| Without CME session gate | −50.20 | −33.22 | −45.44 |
+| Without CME session gate | −50.51 | −33.22 | −45.44 |
 
 Interpretation:
 - **EMA 20/50 + RSI** and **Trend Following** lose even before costs; the 95% CI of expectancy is entirely below zero ⇒ FAIL on this sample.
@@ -106,6 +106,17 @@ New test files: `test_indicators.py`, `test_sessions.py`, `test_strategies.py`, 
 6. Intrabar order is unknown; stop-first is conservative but not proof.
 7. Backtest risk rules differ from Phase 3 in one place: consecutive-loss pause ends at 00:00 UTC instead of manual review.
 8. Results are research, not trading advice, and do not justify live trading.
+
+## 6b. Independent code review (separate reviewer agent)
+
+No HIGH or MEDIUM findings. Six LOW findings, all fixed in the second commit (primary results unchanged; two stress figures moved by < 0.4 USDC):
+
+1. Evening session before full CME closures (Thursday night before Good Friday, Christmas/New Year eves) was treated as open → closed now.
+2. Off-hours cost multiplier ignored holidays (slightly optimistic) → holiday-aware `reference_trading()`.
+3. CL expiry used the conservative holiday list, so December expiries were off by 1–3 days → separate exchange business-day calendar.
+4. Zero-volume check used the fill bar's volume (known only after the fill) → uses the signal bar.
+5. Missing funding feed let entries through the abnormal-funding gate → `FUNDING_DATA_MISSING` blocks (fail closed).
+6. Walk-forward train windows overlap the holdout segment → stated in the report; the holdout criterion uses only the dev-locked parameters.
 
 ## 7. Security review
 

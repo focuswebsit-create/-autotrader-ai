@@ -103,3 +103,30 @@ npm run build      -> Compiled successfully; "/" is dynamic (server-rendered on 
 2. Coin `xyz:` (empty symbol) was accepted → validation now requires a non-empty symbol.
 3. Live calls failed behind an HTTPS proxy because a custom httpx transport ignores proxy env vars → ADR-009.
 4. RTL rendering scrambled parentheses in the market card title → Latin parts are wrapped in `<bdi>`.
+
+
+---
+
+# Phase 2 — Backtesting & Strategy Engine (2026-11-04)
+
+```
+uv run ruff check src tests && uv run ruff format --check src tests   -> All checks passed
+uv run mypy                                                         -> Success: no issues found in 57 source files
+AUTOTRADER_TEST_DATABASE_URL=...autotrader_test uv run pytest      -> 402 passed, 4 skipped (live, opt-in)
+RUN_LIVE_TESTS=1 uv run pytest -m live                              -> 4 passed
+npm run lint / typecheck / build                                    -> clean; routes "/" and "/backtest" dynamic
+uv run autotrader safety-check                                      -> PAPER, only POST /info
+```
+
+Coverage of new modules: engine 98%, metrics 100%, indicators 98%, sessions 99%, strategies 93%, research 88%, funding ingest 96% (total 91%).
+
+End-to-end on a fresh PostgreSQL 16 database:
+```
+alembic upgrade head                 -> 0006_backtest
+autotrader backfill                  -> 30m: 5,001 received, 0 gaps; 1h: 5,001 received, 0 gaps
+autotrader funding-sync              -> 7,242 hourly records (2026-01-06 15:00 -> 2026-11-04 08:00)
+autotrader backtest                  -> runs stored; ema_rsi FAIL, trend_pullback FAIL, breakout_volume INCONCLUSIVE; 0 audit violations
+GET /api/backtest/runs, /runs/{id}   -> 200; /runs/1x via web proxy -> 404; POST -> 405
+Playwright (iPhone 13 + 1280px)      -> no console errors, no horizontal overflow
+```
+Determinism: repeated runs on the same data give identical `report_sha256`; file-based and DB-based runs gave identical results.
