@@ -150,3 +150,24 @@ New and extended tests:
 
 ### CI fix
 The GitHub Actions `backend` job failed on `ddeb798` (run #14). `test_backtest_api_without_db` used `Settings()`, which reads `AUTOTRADER_DATABASE_URL`. CI exports that variable, so the "no DB" test reached a database whose tables an integration test had just dropped. The test is now explicit (`Settings(database_url=None)`). Reproduced locally with the CI environment before the fix (1 failed) and verified after it: 405 passed both with and without `AUTOTRADER_DATABASE_URL`.
+
+---
+
+# Phase 2.5 — Forward Testing (2026-11-04)
+```
+uv run ruff check / format --check src tests; uv run mypy   -> clean (64 files)
+pytest with PostgreSQL 16 (*_test DB)                       -> 432 passed, 4 skipped (live, opt-in)
+npm run lint / typecheck / build                            -> clean; /forward dynamic
+```
+- **Replay-as-live on recorded mainnet data:**
+  - 20 days, 959 decisions, 26 signals, 11 trades;
+  - parity 959/959, 0 audit violations, verdict INCONCLUSIVE.
+- **Phase 2 backtest re-run on the identical dataset** after the `live_edge` change: reports identical to runs 7–9 (apart from the commit hash).
+- **PostgreSQL rejects:**
+  - UPDATE/DELETE/TRUNCATE on the forward tables;
+  - a decision before `starts_at`;
+  - a decision before its bar closed;
+  - a duplicate bar;
+  - a test starting before its creation;
+  - TRUNCATE on the backtest tables.
+- **Concurrent freezes:** two threads → exactly one active test.
