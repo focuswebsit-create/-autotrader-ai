@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, make_url, text
+from sqlalchemy import create_engine, make_url, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
@@ -757,3 +757,49 @@ def test_concurrent_freeze_creates_one_active_test(migrated: str) -> None:
     with sessions() as s:
         assert len(active_tests(s, "xyz:CL")) == 1
     assert len(errors) == 1 and "already exists" in errors[0]
+
+
+def test_forward_replay_parity_on_postgresql(migrated: str) -> None:
+    """End-to-end forward recording + evaluation on PostgreSQL (not SQLite): stored
+    NUMERIC values must reproduce exactly. Regression for the live run, where the
+    first SIGNAL made a test INVALID because PostgreSQL rounded the stored ATR."""
+    import gzip
+    from datetime import UTC, datetime, timedelta
+
+    from autotrader.db.market_data import upsert_candles
+    from autotrader.db.models import ForwardDecision, ForwardTest
+    from autotrader.forward import evaluate as ev
+    from autotrader.forward import recorder as rec
+    from autotrader.market.candles import Candle, Interval, parse_candle
+    from tests.conftest import FIXTURES, PHASE2_RECORDED_AT
+
+    engine = create_engine(migrated)
+    with engine.begin() as c:
+        # historical replay needs fixed timestamps: owner-only, test database only
+        for table in ("forward_tests", "forward_decisions"):
+            c.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER trg_{table}_wallclock"))
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    for name, iv in (
+        ("candleSnapshot_xyzCL_30m_2026-11-04_full.json.gz", Interval.M30),
+        ("candleSnapshot_xyzCL_1h_2026-11-04_full.json.gz", Interval.H1),
+    ):
+        with gzip.open(FIXTURES / name, "rt") as f:
+            raw = json.load(f)
+        cs = [parse_candle(r, coin="xyz:CL", interval=iv) for r in raw]
+        ok = [c for c in cs if isinstance(c, Candle) and c.is_closed_at(PHASE2_RECORDED_AT)]
+        with sessions.begin() as s:
+            upsert_candles(s, ok, source="rest", now=PHASE2_RECORDED_AT)
+    freeze_at = datetime(2026, 10, 10, 9, 7, tzinfo=UTC)
+    with sessions.begin() as s:
+        tid = rec.create_test(s, "xyz:CL", "breakout_volume", now=freeze_at, code_version="t").id
+    now = freeze_at
+    while now < freeze_at + timedelta(days=4):
+        now += timedelta(hours=6)
+        with sessions.begin() as s:
+            rec.tick(s, s.get(ForwardTest, tid), now=now)
+    with sessions() as s:
+        signals = [r for r in s.scalars(select(ForwardDecision)) if r.side]
+        report = ev.evaluate(s, s.get(ForwardTest, tid), now=now)
+    assert signals, "the replay window must contain at least one SIGNAL"
+    assert report["parity"]["mismatches"] == 0, report["parity"]
+    assert report["verdict"]["status"] == "INCONCLUSIVE"

@@ -90,9 +90,17 @@ def build_forward_router(
             age = (now - hb.last_heartbeat_at.astimezone(UTC)).total_seconds()
             if hb.state == "STOPPED" or age > FORWARD_HEARTBEAT_MAX_S:
                 alerts.append({"code": "FORWARD_WORKER_DOWN", "severity": "ERROR"})
-        for tid, st in states.items():
-            if st == "INTEGRITY_HALT":
+        # Alert only on the LATEST test of each strategy: a halted test that has been
+        # superseded by a newer freeze stays visible in reports but must not keep the
+        # pipeline "DOWN" forever (that would mask real outages).
+        latest: dict[str, int] = {}
+        for t in tests:
+            latest[t.strategy_id] = max(latest.get(t.strategy_id, 0), t.id)
+        for sid, tid in sorted(latest.items()):
+            if states[tid] == "INTEGRITY_HALT":
                 alerts.append({"code": f"FORWARD_TEST_{tid}_INTEGRITY_HALT", "severity": "ERROR"})
+            elif states[tid] == "STOPPED":
+                alerts.append({"code": f"FORWARD_{sid.upper()}_NOT_RUNNING", "severity": "WARNING"})
         for tid, minutes in lags.items():
             # a decided bar closes every 30 min: > 75 min since the last one = not recording
             if minutes > 75:

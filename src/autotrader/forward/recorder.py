@@ -44,6 +44,7 @@ from autotrader.forward.freeze import (
     build_config,
     canonical_sha256,
     params_from_config,
+    stored_decimal,
     strategy_code_hash,
 )
 from autotrader.ingest.funding import load_funding
@@ -365,7 +366,7 @@ def tick(session: Session, test: ForwardTest, *, now: datetime) -> TickResult:
                 late=late,
                 side=d.side.value if d.side else None,
                 reason=d.reason,
-                atr=d.atr,
+                atr=stored_decimal(d.atr),
                 rationale=d.rationale,
                 market=_market_snapshot(bar, funding, disc, now, late),
                 strategy_version=cfg["strategy"]["version"],
