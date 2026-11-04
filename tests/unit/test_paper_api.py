@@ -125,3 +125,28 @@ def test_paper_health_without_accounts() -> None:
     c = TestClient(create_app(Settings(), sessionmaker(bind=eng)))
     r = c.get("/api/paper/health")
     assert r.status_code == 200 and r.json()["status"] == "NOT_CONFIGURED"
+
+
+def test_readiness_comes_from_the_running_worker(env: Any) -> None:  # noqa: F811
+    from autotrader.paper import worker
+    from tests.unit.paper_helpers import COIN
+    from tests.unit.test_paper_engine import T0
+
+    sessions, _, _ = env
+    r = _client(sessions, T0).get("/api/paper/summary").json()["readiness"]
+    assert r == {"ok": False, "fresh": False, "reason": "PAPER_WORKER_NOT_RUNNING", "checks": []}
+    out = worker.run_once(sessions, COIN, None, T0, book=book(T0, "80.00", "80.02"))
+    worker._heartbeat(sessions, "RUNNING", T0, T0, out)
+    r = _client(sessions, T0 + timedelta(seconds=3)).get("/api/paper/summary").json()["readiness"]
+    assert r["ok"] is True and r["fresh"] is True
+    assert {c["check"] for c in r["checks"]} >= {"COLLECTOR", "ORDER_BOOK", "RISK_LIMITS"}
+    # no fresh book -> the worker reports the failed check, Start stays disabled
+    out = worker.run_once(sessions, COIN, None, T0, book=None, book_error="FETCH_FAILED:X")
+    worker._heartbeat(sessions, "RUNNING", T0, T0, out)
+    r = _client(sessions, T0 + timedelta(seconds=3)).get("/api/paper/summary").json()["readiness"]
+    assert r["ok"] is False and r["reason"] == "CHECK_FAILED"
+    bad = [c for c in r["checks"] if not c["ok"]]
+    assert [c["check"] for c in bad] == ["ORDER_BOOK"]
+    # worker silent for a minute -> not ready
+    r = _client(sessions, T0 + timedelta(seconds=61)).get("/api/paper/summary").json()["readiness"]
+    assert r["ok"] is False and r["reason"] == "PAPER_WORKER_DOWN"

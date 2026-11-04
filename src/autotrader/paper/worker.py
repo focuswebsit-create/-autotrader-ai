@@ -80,6 +80,7 @@ def run_once(
         ids = [a.id for a in engine.accounts(s, coin)]
     market = engine.Market(now=now, book=book, book_error=book_error, ctx=ctx)
     states: dict[str, str] = {}
+    readiness: dict[str, Any] = {}
     for acc_id in ids:
         try:
             with sessions.begin() as s:
@@ -87,12 +88,25 @@ def run_once(
                 assert acc is not None
                 engine.tick(s, acc, market)
                 states[str(acc_id)] = engine.current_state(s, acc_id).state
+                # the same checks START runs, published for the terminal's Start button
+                cfg = config_from_dict(
+                    {k: v for k, v in acc.config.items() if k != "history_anchor"}
+                )
+                checks = engine.preflight(s, acc, cfg, market)
+                readiness[str(acc_id)] = {
+                    "at": now.isoformat(),
+                    "ok": all(c["ok"] for c in checks),
+                    "checks": checks,
+                }
         except Exception:
             # the transaction is rolled back; nothing half-written. Retry next tick.
             log.exception("paper tick failed", extra={"account": acc_id})
             states[str(acc_id)] = "ERROR"
+            readiness[str(acc_id)] = {"at": now.isoformat(), "ok": False, "checks": [
+                {"check": "ENGINE", "ok": False, "detail": "ENGINE_TICK_FAILED"}]}  # fmt: skip
     return {
         "states": states,
+        "readiness": readiness,
         "book": None
         if book is None
         else {

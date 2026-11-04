@@ -218,6 +218,32 @@ def summary(session: Session, acc: PaperAccount, now: datetime) -> dict[str, Any
             "max_leverage": str(cfg.risk.max_leverage),
         },
         "last_decision": decision_json(last_dec) if last_dec else None,
+        "readiness": readiness(session, acc, now),
+    }
+
+
+def readiness(session: Session, acc: PaperAccount, now: datetime) -> dict[str, Any]:
+    """Pre-flight checks as the running worker last evaluated them (heartbeat).
+
+    The terminal enables "start" only when these are all OK and fresh: the worker
+    re-runs exactly the same checks when it executes START, so this is a preview,
+    never a bypass.
+    """
+    hb = session.get(ServiceHeartbeat, SERVICE_NAME)
+    if hb is None:
+        return {"ok": False, "fresh": False, "reason": "PAPER_WORKER_NOT_RUNNING", "checks": []}
+    age = (now - (_utc(hb.last_heartbeat_at) or now)).total_seconds()
+    r = ((hb.details or {}).get("readiness") or {}).get(str(acc.id))
+    if hb.state != "RUNNING" or age >= 60:
+        return {"ok": False, "fresh": False, "reason": "PAPER_WORKER_DOWN", "checks": []}
+    if not isinstance(r, dict):
+        return {"ok": False, "fresh": False, "reason": "NO_READINESS_YET", "checks": []}
+    return {
+        "ok": bool(r.get("ok")),
+        "fresh": True,
+        "reason": None if r.get("ok") else "CHECK_FAILED",
+        "at": r.get("at"),
+        "checks": r.get("checks") or [],
     }
 
 
