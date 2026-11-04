@@ -345,3 +345,10 @@ def test_secret_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTOTRADER_CONTROL_SECRET", "too-short")
     with pytest.raises(RuntimeError, match="CONTROL_SECRET"):
         create_control_app(Settings(), sessions)
+
+
+def test_placeholder_secret_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOTRADER_CONTROL_SECRET", "change-me-generate-a-random-48-char-value")
+    sessions = sessionmaker(bind=create_engine("sqlite://"))
+    with pytest.raises(RuntimeError, match="CONTROL_SECRET"):
+        create_control_app(Settings(), sessions)

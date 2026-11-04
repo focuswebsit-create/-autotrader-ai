@@ -90,3 +90,38 @@ def test_bad_inputs(env: Any) -> None:  # noqa: F811
     assert c.get("/api/paper/decisions?limit=100000").status_code == 422
     nodb = TestClient(create_app(Settings(database_url=None)))
     assert nodb.get("/api/paper/summary").status_code == 503
+
+
+def test_paper_health_for_monitoring(env: Any) -> None:  # noqa: F811
+    from tests.unit.paper_helpers import command
+
+    sessions, acc_id, _ = env
+    from tests.unit.test_paper_engine import T0
+
+    r = _client(sessions, T0).get("/api/paper/health")
+    assert r.status_code == 503 and r.json()["alerts"][0]["code"] == "PAPER_WORKER_DOWN"
+    _quote(sessions, T0, "80.00", "80.02")
+    r = _client(sessions, T0 + timedelta(seconds=5)).get("/api/paper/health")
+    assert r.status_code == 200 and r.json()["status"] == "OK"
+    assert r.json()["accounts"] == {"demo": "STOPPED"}
+    command(sessions, acc_id, "KILL", T0, "kill-health-1")
+    tick(sessions, acc_id, T0, book(T0, "80.00", "80.02"))
+    r = _client(sessions, T0 + timedelta(seconds=5)).get("/api/paper/health")
+    assert r.status_code == 503 and r.json()["alerts"][0]["code"] == "PAPER_DEMO_HALTED:KILL_SWITCH"
+    r = _client(sessions, T0 + timedelta(minutes=5)).get("/api/paper/health")
+    assert {a["code"] for a in r.json()["alerts"]} >= {"PAPER_WORKER_DOWN"}
+
+
+def test_paper_health_without_accounts() -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from autotrader.db.models import Base
+
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                        poolclass=StaticPool)  # fmt: skip
+    Base.metadata.create_all(eng)
+    c = TestClient(create_app(Settings(), sessionmaker(bind=eng)))
+    r = c.get("/api/paper/health")
+    assert r.status_code == 200 and r.json()["status"] == "NOT_CONFIGURED"

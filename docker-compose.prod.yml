@@ -25,6 +25,14 @@ services:
     <<: *logging
     environment:
       AUTOTRADER_GIT_SHA: ${AUTOTRADER_GIT_SHA:-unknown}
+  paper-trader:
+    restart: always
+    <<: *logging
+  control:
+    restart: always
+    <<: *logging
+    environment:
+      AUTOTRADER_COOKIE_SECURE: "true"
   web:
     restart: always
     <<: *logging

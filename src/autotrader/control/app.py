@@ -69,7 +69,7 @@ class CommandBody(BaseModel):
 
 def _secret() -> bytes:
     raw = os.environ.get("AUTOTRADER_CONTROL_SECRET", "")
-    if len(raw) < 32:
+    if len(raw) < 32 or "change-me" in raw.lower():
         raise RuntimeError("AUTOTRADER_CONTROL_SECRET must be set (>= 32 random characters)")
     return raw.encode()
 
