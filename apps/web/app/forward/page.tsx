@@ -18,6 +18,9 @@ export default function ForwardPage() {
           </p>
         </div>
         <nav className="flex gap-4 text-sm">
+          <Link href="/terminal" className="underline">
+            טרמינל PAPER
+          </Link>
           <Link href="/backtest" className="underline">
             מעבדת Backtest
           </Link>

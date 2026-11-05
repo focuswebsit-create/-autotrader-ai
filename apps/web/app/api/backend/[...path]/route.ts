@@ -14,6 +14,13 @@ const ALLOWED = new Set([
   "backtest/runs",
   "backtest/strategies",
   "forward/tests",
+  // Phase 3: PAPER trading terminal (read-only ledger views)
+  "paper/summary",
+  "paper/trades",
+  "paper/decisions",
+  "paper/events",
+  "paper/equity",
+  "paper/health",
 ]);
 // Run details: backtest/runs/<numeric id> only.
 const RUN_DETAIL = /^(backtest\/runs\/[1-9][0-9]{0,15}|forward\/tests\/[1-9][0-9]{0,15}(\/decisions)?)$/;

@@ -200,3 +200,44 @@ The database keeps all bars it has ever collected, so coverage grows over time w
   - INCONCLUSIVE until ≥ 30 closed trades, ≥ 30 days and ≥ 15 distinct trade days.
   - Then PASS only if the CI is above 0 and the strategy is still profitable at 2× costs; FAIL if the CI is below 0.
   - INVALID on a code change, a parity mismatch or an audit violation.
+
+## ADR-032 — Phase 3 PAPER engine is a separate, append-only process (2026-11-04, Phase 3)
+- The **paper-trader** worker is the only writer of PAPER fills. It is a separate service from the collector and the forward recorder, and holds a PostgreSQL advisory lock, so a second engine on the same database exits.
+- It does not change any frozen file of the forward tests (`forward/freeze.py:CODE_FILES`). The paper engine hashes its own inputs (`paper/config.py:PAPER_CODE_FILES`): if they change, the account blocks entries with `STRATEGY_CODE_CHANGED`.
+- History is **append-only**:
+  - state changes are `paper_bot_events` rows;
+  - money moves are `paper_ledger` rows (DEPOSIT, FEE, REALIZED_PNL, FUNDING, each with a unique reference);
+  - closes are `paper_position_closes` rows.
+- Nothing is updated or deleted: triggers reject UPDATE, DELETE and TRUNCATE.
+- Balance and P&L are always recomputed from the ledger, summed exactly in Python `Decimal`.
+- Paper rows must be stamped within ±5 minutes of the DB clock, so no row can be backdated. The engine also decides only bars that closed after the session started and within a 180 s entry window, so a signal is never traded in hindsight.
+- PostgreSQL itself enforces three entry rules: an entry needs the bot to be RUNNING, only one position may be open, and the daily entry cap applies. A bug in the Python engine cannot open a second position.
+
+## ADR-033 — Fills are simulated from the live public L2 book, conservatively (2026-11-04, Phase 3)
+- **Entries and stops:** taker fills that walk the 20-level `l2Book` from the Info API, which is read-only and allow-listed. The fill is the VWAP, plus 2 bps of extra slippage, rounded **against** us to the tick.
+- **Depth limit:** an entry refuses to move more than 0.5% through the book. The remainder of an exit beyond the visible depth is filled at the worst visible level.
+- **Targets:** a limit at the target price, and only when the book trades through it with enough depth.
+- **Fee:** the observed taker fee, 0.009% (ADR-028), on every fill.
+- **Funding:** the recorded hourly rate × notional at that hour's 30m close. When the rate is missing beyond a 30-minute grace, a conservative assumed rate is charged and a `FUNDING_ASSUMED` risk event is recorded.
+- **Sizing:** 0.25% of equity at risk. The worst-case loss uses the stop plus a 10 bps stop-slippage estimate, plus fees. Leverage is capped at 2×.
+- **Kill limits:** 1% daily loss blocks entries for the UTC day; a 5% drawdown, or 3 losses in a row, sets HALTED, which needs an owner reset.
+- **No entry when the inputs aren't clean:** a stale or crossed book, a spread over 15 bps, a stale collector or candles, missing or abnormal funding, an abnormal bar range, or a ledger that does not reconcile.
+
+## ADR-034 — Owner control through a separate authenticated Control API (2026-11-04, Phase 3)
+- The read API stays GET-only. Start, stop, pause, resume, kill, close-and-stop and reset-halt go through a separate FastAPI service, `control`. It runs as its own DB login (`autotrader_control`), which may only INSERT `paper_commands`, `audit_log` and auth rows, and revoke a session.
+- The Control API only **appends a command**. The paper worker executes it and re-runs every pre-flight check. The UI's readiness view is a preview from the worker heartbeat, never a bypass.
+- **Authentication:**
+  - passwords are hashed with scrypt; the minimum length is 12; unknown users are checked against a dummy hash, so they cannot be enumerated;
+  - 5 failures in 15 minutes lock the user and the client;
+  - the session token is a random 32-byte value in an `HttpOnly`, `SameSite=Strict`, `Secure` cookie (Secure in production); only its sha256 is stored; sessions expire after 12 h;
+  - logout revokes the session, and the database allows only that one change.
+- **Every state change requires:**
+  - an allowed `Origin`;
+  - the CSRF header `X-CSRF-Token = HMAC(secret, session token)`;
+  - the ADMIN role;
+  - staying within the rate limit of 6 per minute;
+  - a client idempotency key, so a double click becomes one command;
+  - no other command pending, and the action being allowed from the current state.
+- Each action is written to `audit_log`.
+- Kill Switch = HALTED: no new entries, and an open position keeps its stop and target. "Close and stop" closes at the live book and stops; it needs an explicit confirmation, as does the reset after a halt.
+- The Control API is never published on the host. The Next.js server proxies an allow-list of paths, forwarding only the session cookie, the CSRF header and the Origin.
